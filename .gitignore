@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+.env
+data/train.csv
+phoenix-data/
+postgres-data/
+ollama-data/
