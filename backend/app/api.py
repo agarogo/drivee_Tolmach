@@ -1,38 +1,66 @@
-import time
-from datetime import datetime
+from datetime import datetime, time, timedelta
+from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery, status
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.orchestrator import run_query_workflow
 from app.auth import create_access_token, get_current_user, hash_password, require_admin, verify_password
+from app.config import get_settings
 from app.db import get_db
-from app.models import Chat, Message, QueryLog, Report, Template, User
+from app.models import (
+    Chat,
+    Message,
+    Query,
+    QueryClarification,
+    QueryEvent,
+    Report,
+    ReportRecipient,
+    ReportVersion,
+    Schedule,
+    ScheduleRun,
+    SemanticLayer,
+    SqlGuardrailLog,
+    Template,
+    User,
+)
 from app.schemas import (
     AssistantMessageResponse,
     AuthResponse,
     ChatOut,
+    ClarificationOut,
+    GuardrailLogOut,
     LogOut,
     LoginRequest,
     MessageOut,
     MessagesPage,
+    QueryClarifyRequest,
+    QueryEventOut,
+    QueryOut,
+    QueryRunRequest,
     RegisterRequest,
     ReportCreate,
     ReportOut,
+    ReportPatch,
+    ReportVersionOut,
+    ScheduleCreate,
+    ScheduleOut,
+    SchedulePatch,
     ScheduleRequest,
+    ScheduleRunOut,
+    SemanticLayerCreate,
+    SemanticLayerOut,
     SendMessageRequest,
     TemplateCreate,
     TemplateOut,
     UserOut,
 )
-from app.services.charts import recommend_chart
-from app.services.guardrails import GuardrailError, ensure_safe_sql
-from app.services.nl2sql import TextToSqlService
-from app.services.query_runner import run_sql
-from app.config import get_settings
+from app.services.guardrails import validate_sql
+from app.services.query_runner import execute_validated_select
 
 router = APIRouter()
-text_to_sql = TextToSqlService()
 settings = get_settings()
 
 
@@ -40,375 +68,786 @@ def to_user_out(user: User) -> UserOut:
     return UserOut.model_validate(user)
 
 
-def chat_out(db: Session, chat: Chat) -> ChatOut:
-    count = db.query(func.count(Message.id)).filter(Message.chat_id == chat.id).scalar() or 0
+def make_chat_title(question: str) -> str:
+    compact = " ".join(question.strip().split())
+    if len(compact) <= 30:
+        return compact
+    return compact[:29].rstrip() + "..."
+
+
+async def chat_out(db: AsyncSession, chat: Chat) -> ChatOut:
+    count = await db.scalar(select(func.count(Message.id)).where(Message.chat_id == chat.id))
     return ChatOut(
         id=chat.id,
         title=chat.title,
         created_at=chat.created_at,
         updated_at=chat.updated_at,
-        message_count=count,
+        message_count=count or 0,
     )
 
 
-def require_owned_chat(db: Session, chat_id: int, user: User) -> Chat:
-    chat = db.get(Chat, chat_id)
+async def require_owned_chat(db: AsyncSession, chat_id: UUID, user: User) -> Chat:
+    chat = await db.get(Chat, chat_id)
     if not chat or chat.user_id != user.id:
         raise HTTPException(status_code=404, detail="Чат не найден")
     return chat
 
 
-def make_chat_title(question: str) -> str:
-    compact = " ".join(question.strip().split())
-    if len(compact) <= 30:
-        return compact
-    return compact[:29].rstrip() + "…"
+async def ensure_query_chat(db: AsyncSession, user: User, chat_id: UUID | None, question: str) -> Chat:
+    if chat_id:
+        return await require_owned_chat(db, chat_id, user)
+    chat = Chat(user_id=user.id, title=make_chat_title(question))
+    db.add(chat)
+    await db.flush()
+    return chat
 
 
+async def require_owned_query(db: AsyncSession, query_id: UUID, user: User) -> Query:
+    item = await db.get(Query, query_id)
+    if not item or item.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Запрос не найден")
+    return item
+
+
+async def require_owned_report(db: AsyncSession, report_id: UUID, user: User) -> Report:
+    item = await db.get(Report, report_id)
+    if not item or item.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    return item
+
+
+def next_run_at(frequency: str, run_at: time | None, day_of_week: int | None, day_of_month: int | None) -> datetime:
+    now = datetime.utcnow()
+    target_time = run_at or time(9, 0)
+    candidate = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
+    if frequency == "daily":
+        return candidate if candidate > now else candidate + timedelta(days=1)
+    if frequency == "weekly":
+        target_dow = day_of_week or 1
+        days = (target_dow - (now.isoweekday())) % 7
+        candidate = candidate + timedelta(days=days)
+        return candidate if candidate > now else candidate + timedelta(days=7)
+    target_day = min(day_of_month or 1, 28)
+    candidate = candidate.replace(day=target_day)
+    if candidate <= now:
+        candidate = (candidate.replace(day=1) + timedelta(days=32)).replace(day=target_day)
+    return candidate
+
+
+def parse_run_time(value: Any) -> time:
+    if isinstance(value, time):
+        return value
+    if isinstance(value, str) and value:
+        parts = value.split(":")
+        return time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    return time(9, 0)
+
+
+async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
+    events = list(
+        (
+            await db.scalars(
+                select(QueryEvent).where(QueryEvent.query_id == item.id).order_by(QueryEvent.started_at.asc())
+            )
+        ).all()
+    )
+    guardrails = list(
+        (await db.scalars(select(SqlGuardrailLog).where(SqlGuardrailLog.query_id == item.id))).all()
+    )
+    clarifications = list(
+        (
+            await db.scalars(
+                select(QueryClarification)
+                .where(QueryClarification.query_id == item.id)
+                .order_by(QueryClarification.created_at.asc())
+            )
+        ).all()
+    )
+    return QueryOut(
+        id=item.id,
+        chat_id=item.chat_id,
+        natural_text=item.natural_text,
+        generated_sql=item.generated_sql,
+        corrected_sql=item.corrected_sql,
+        confidence_score=float(item.confidence_score or 0),
+        confidence_band=item.confidence_band,
+        status=item.status,
+        block_reason=item.block_reason,
+        interpretation=item.interpretation_json,
+        semantic_terms=item.semantic_terms_json,
+        sql_plan=item.sql_plan_json,
+        confidence_reasons=item.confidence_reasons_json,
+        ambiguity_flags=item.ambiguity_flags_json,
+        rows_returned=item.rows_returned,
+        execution_ms=item.execution_ms,
+        chart_type=item.chart_type,
+        chart_spec=item.chart_spec,
+        result_snapshot=item.result_snapshot,
+        ai_answer=item.ai_answer,
+        error_message=item.error_message,
+        auto_fix_attempts=item.auto_fix_attempts,
+        clarifications=[ClarificationOut.model_validate(row, from_attributes=True) for row in clarifications],
+        events=[QueryEventOut.model_validate(row, from_attributes=True) for row in events],
+        guardrail_logs=[GuardrailLogOut.model_validate(row, from_attributes=True) for row in guardrails],
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+async def schedule_to_out(db: AsyncSession, item: Schedule) -> ScheduleOut:
+    report = await db.get(Report, item.report_id)
+    recipients = list(
+        (
+            await db.scalars(
+                select(ReportRecipient).where(ReportRecipient.report_id == item.report_id).order_by(ReportRecipient.added_at)
+            )
+        ).all()
+    )
+    runs = list(
+        (
+            await db.scalars(
+                select(ScheduleRun).where(ScheduleRun.schedule_id == item.id).order_by(ScheduleRun.ran_at.desc()).limit(10)
+            )
+        ).all()
+    )
+    return ScheduleOut(
+        id=item.id,
+        report_id=item.report_id,
+        report_title=report.title if report else "Отчёт",
+        frequency=item.frequency,
+        run_at_time=item.run_at_time,
+        day_of_week=item.day_of_week,
+        day_of_month=item.day_of_month,
+        next_run_at=item.next_run_at,
+        last_run_at=item.last_run_at,
+        is_active=item.is_active,
+        recipients=[row.email for row in recipients],
+        runs=[ScheduleRunOut.model_validate(row, from_attributes=True) for row in runs],
+    )
+
+
+async def report_to_out(db: AsyncSession, item: Report, include_detail: bool = True) -> ReportOut:
+    recipients = list((await db.scalars(select(ReportRecipient).where(ReportRecipient.report_id == item.id))).all())
+    versions = []
+    schedules = []
+    if include_detail:
+        versions = list(
+            (
+                await db.scalars(
+                    select(ReportVersion).where(ReportVersion.report_id == item.id).order_by(ReportVersion.version_number.desc())
+                )
+            ).all()
+        )
+        schedule_rows = list(
+            (
+                await db.scalars(
+                    select(Schedule).where(Schedule.report_id == item.id).order_by(Schedule.created_at.desc())
+                )
+            ).all()
+        )
+        schedules = [await schedule_to_out(db, row) for row in schedule_rows]
+    first_schedule = schedules[0] if schedules else None
+    return ReportOut(
+        id=item.id,
+        title=item.title,
+        natural_text=item.natural_text,
+        generated_sql=item.generated_sql,
+        chart_type=item.chart_type,
+        chart_spec=item.chart_spec,
+        result_snapshot=item.result_snapshot,
+        config_json=item.config_json,
+        is_active=item.is_active,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        recipients=[row.email for row in recipients],
+        schedules=schedules,
+        versions=[ReportVersionOut.model_validate(row, from_attributes=True) for row in versions],
+        question=item.natural_text,
+        sql_text=item.generated_sql,
+        result=item.result_snapshot,
+        schedule=first_schedule.model_dump(mode="json") if first_schedule else {},
+    )
+
+
+@router.get("/health")
 @router.get("/api/health")
-def health() -> dict:
+async def health() -> dict:
     return {
         "status": "ok",
-        "app": "Толмач",
+        "app": "Толмач by Drivee",
+        "database": "postgresql",
+        "database_name": settings.analytics_database_name,
+        "mode": "read-only analytics executor",
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
-        "ollama_base_url": settings.ollama_base_url,
+    }
+
+
+@router.get("/metrics")
+async def metrics() -> dict:
+    return {"status": "ok", "service": "tolmach", "otel": "optional", "queries_endpoint": "/queries/run"}
+
+
+@router.get("/traces-link")
+async def traces_link() -> dict:
+    return {
+        "phoenix_url": "http://localhost:6006",
+        "otel_endpoint_env": "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "note": "OpenTelemetry/Phoenix can subscribe to query_events; UI Trace Panel reads persisted events.",
     }
 
 
 @router.post("/auth/register", response_model=AuthResponse)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> AuthResponse:
+async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
     email = payload.email.strip().lower()
     if "@" not in email:
         raise HTTPException(status_code=400, detail="Введите корректный email")
-    if db.query(User).filter(User.email == email).first():
+    if await db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="Пользователь уже существует")
-
-    user = User(email=email, password_hash=hash_password(payload.password), role=payload.role)
+    user = User(
+        email=email,
+        full_name=payload.full_name or email.split("@", 1)[0],
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+        preferences={"theme": "dark"},
+    )
     db.add(user)
-    db.commit()
-    db.refresh(user)
-    token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
+    await db.commit()
+    await db.refresh(user)
+    token = create_access_token({"sub": str(user.id), "email": user.email, "role": user.role})
     return AuthResponse(access_token=token, user=to_user_out(user))
 
 
 @router.post("/auth/login", response_model=AuthResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthResponse:
-    user = db.query(User).filter(User.email == payload.email.strip().lower()).first()
-    if not user or not verify_password(payload.password, user.password_hash):
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+    user = await db.scalar(select(User).where(User.email == payload.email.strip().lower()))
+    if not user or not verify_password(payload.password, user.password_hash) or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
-    token = create_access_token({"sub": user.id, "email": user.email, "role": user.role})
+    user.last_login_at = datetime.utcnow()
+    await db.commit()
+    token = create_access_token({"sub": str(user.id), "email": user.email, "role": user.role})
     return AuthResponse(access_token=token, user=to_user_out(user))
 
 
 @router.get("/auth/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)) -> UserOut:
+async def me(user: User = Depends(get_current_user)) -> UserOut:
     return to_user_out(user)
 
 
-@router.get("/api/chats", response_model=list[ChatOut])
-def list_chats(
-    db: Session = Depends(get_db),
+@router.post("/queries/run", response_model=QueryOut)
+async def run_query(
+    payload: QueryRunRequest,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> list[ChatOut]:
-    chats = (
-        db.query(Chat)
-        .filter(Chat.user_id == user.id)
-        .order_by(Chat.updated_at.desc(), Chat.id.desc())
-        .all()
+) -> QueryOut:
+    question = payload.question.strip()
+    chat = await ensure_query_chat(db, user, payload.chat_id, question)
+    prior_count = await db.scalar(select(func.count(Message.id)).where(Message.chat_id == chat.id))
+    if prior_count == 0:
+        chat.title = make_chat_title(question)
+    user_message = Message(chat_id=chat.id, role="user", content=question, payload={})
+    db.add(user_message)
+    await db.flush()
+
+    item = await run_query_workflow(db, user, question, chat.id)
+    output = await query_to_out(db, item)
+    assistant_message = Message(
+        chat_id=chat.id,
+        role="assistant",
+        content=item.ai_answer or "Готово.",
+        payload={
+            **output.model_dump(mode="json"),
+            "type": item.status,
+            "rows": item.result_snapshot,
+            "sql": item.corrected_sql or item.generated_sql,
+        },
     )
-    return [chat_out(db, chat) for chat in chats]
+    chat.updated_at = datetime.utcnow()
+    db.add(assistant_message)
+    await db.commit()
+    return output
+
+
+@router.post("/queries/{query_id}/clarify", response_model=QueryOut)
+async def clarify_query(
+    query_id: UUID,
+    payload: QueryClarifyRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> QueryOut:
+    original = await require_owned_query(db, query_id, user)
+    clarification = await db.scalar(
+        select(QueryClarification)
+        .where(QueryClarification.query_id == query_id)
+        .order_by(QueryClarification.created_at.desc())
+    )
+    answer = payload.freeform_answer or payload.chosen_option
+    if not answer:
+        raise HTTPException(status_code=400, detail="Нужно выбрать вариант или написать уточнение")
+    if clarification:
+        clarification.chosen_option = payload.chosen_option
+        clarification.freeform_answer = payload.freeform_answer
+        clarification.answered_at = datetime.utcnow()
+    original.status = "clarified"
+    await db.flush()
+    clarified_question = f"{original.natural_text}. Уточнение: {answer}"
+    chat: Chat | None = None
+    if original.chat_id:
+        chat = await require_owned_chat(db, original.chat_id, user)
+        db.add(Message(chat_id=chat.id, role="user", content=answer, payload={"clarifies_query_id": str(original.id)}))
+        await db.flush()
+    item = await run_query_workflow(db, user, clarified_question, original.chat_id)
+    output = await query_to_out(db, item)
+    if chat:
+        db.add(
+            Message(
+                chat_id=chat.id,
+                role="assistant",
+                content=item.ai_answer or "Готово.",
+                payload={
+                    **output.model_dump(mode="json"),
+                    "type": item.status,
+                    "rows": item.result_snapshot,
+                    "sql": item.corrected_sql or item.generated_sql,
+                },
+            )
+        )
+        chat.updated_at = datetime.utcnow()
+        await db.commit()
+    return output
+
+
+@router.get("/queries/history", response_model=list[QueryOut])
+async def query_history(
+    limit: int = ApiQuery(default=30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[QueryOut]:
+    rows = list(
+        (
+            await db.scalars(
+                select(Query).where(Query.user_id == user.id).order_by(Query.created_at.desc()).limit(limit)
+            )
+        ).all()
+    )
+    return [await query_to_out(db, row) for row in rows]
+
+
+@router.get("/queries/{query_id}", response_model=QueryOut)
+async def get_query(
+    query_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> QueryOut:
+    return await query_to_out(db, await require_owned_query(db, query_id, user))
+
+
+@router.get("/templates", response_model=list[TemplateOut])
+@router.get("/api/templates", response_model=list[TemplateOut])
+async def list_templates(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[TemplateOut]:
+    rows = list(
+        (
+            await db.scalars(
+                select(Template)
+                .where(or_(Template.is_public.is_(True), Template.created_by == user.id))
+                .order_by(Template.category.asc(), Template.use_count.desc(), Template.title.asc())
+            )
+        ).all()
+    )
+    return [TemplateOut.model_validate(row) for row in rows]
+
+
+@router.post("/templates", response_model=TemplateOut)
+@router.post("/api/templates", response_model=TemplateOut)
+async def create_template(
+    payload: TemplateCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> TemplateOut:
+    item = Template(created_by=user.id, **payload.model_dump())
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return TemplateOut.model_validate(item)
+
+
+@router.get("/semantic-layer", response_model=list[SemanticLayerOut])
+async def list_semantic_layer(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[SemanticLayerOut]:
+    rows = list((await db.scalars(select(SemanticLayer).order_by(SemanticLayer.term.asc()))).all())
+    return [SemanticLayerOut.model_validate(row) for row in rows]
+
+
+@router.post("/semantic-layer", response_model=SemanticLayerOut)
+async def create_semantic_term(
+    payload: SemanticLayerCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> SemanticLayerOut:
+    item = SemanticLayer(updated_by=user.id, **payload.model_dump())
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    return SemanticLayerOut.model_validate(item)
+
+
+@router.post("/reports", response_model=ReportOut)
+@router.post("/api/reports", response_model=ReportOut)
+async def create_report(
+    payload: ReportCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ReportOut:
+    query = await require_owned_query(db, payload.query_id, user) if payload.query_id else None
+    natural_text = payload.natural_text or payload.question or (query.natural_text if query else "")
+    generated_sql = payload.generated_sql or payload.sql_text or (query.corrected_sql or query.generated_sql if query else "")
+    chart_spec = payload.chart_spec or (query.chart_spec if query else {})
+    result_snapshot = payload.result_snapshot or payload.result or (query.result_snapshot if query else [])
+    chart_type = payload.chart_type or (query.chart_type if query else "table_only")
+    item = Report(
+        user_id=user.id,
+        query_id=query.id if query else None,
+        title=payload.title,
+        natural_text=natural_text,
+        generated_sql=generated_sql,
+        chart_type=chart_type,
+        chart_spec=chart_spec,
+        result_snapshot=result_snapshot,
+        config_json=payload.config_json,
+    )
+    db.add(item)
+    await db.flush()
+    db.add(
+        ReportVersion(
+            report_id=item.id,
+            version_number=1,
+            generated_sql=generated_sql,
+            chart_type=chart_type,
+            config_json=payload.config_json,
+            created_by=user.id,
+        )
+    )
+    for email in payload.recipients:
+        db.add(ReportRecipient(report_id=item.id, email=email))
+    if payload.schedule:
+        schedule = Schedule(
+            report_id=item.id,
+            frequency=payload.schedule.get("frequency", "weekly"),
+            run_at_time=parse_run_time(payload.schedule.get("run_at_time")),
+            day_of_week=payload.schedule.get("day_of_week") or 1,
+            day_of_month=payload.schedule.get("day_of_month"),
+            is_active=payload.schedule.get("is_active", True),
+        )
+        schedule.next_run_at = next_run_at(schedule.frequency, schedule.run_at_time, schedule.day_of_week, schedule.day_of_month)
+        db.add(schedule)
+    await db.commit()
+    await db.refresh(item)
+    return await report_to_out(db, item)
+
+
+@router.get("/reports", response_model=list[ReportOut])
+@router.get("/api/reports", response_model=list[ReportOut])
+async def list_reports(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[ReportOut]:
+    rows = list(
+        (
+            await db.scalars(
+                select(Report).where(Report.user_id == user.id).order_by(Report.updated_at.desc()).limit(100)
+            )
+        ).all()
+    )
+    return [await report_to_out(db, row, include_detail=False) for row in rows]
+
+
+@router.get("/reports/{report_id}", response_model=ReportOut)
+async def get_report(report_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ReportOut:
+    return await report_to_out(db, await require_owned_report(db, report_id, user))
+
+
+@router.patch("/reports/{report_id}", response_model=ReportOut)
+async def patch_report(
+    report_id: UUID,
+    payload: ReportPatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ReportOut:
+    item = await require_owned_report(db, report_id, user)
+    data = payload.model_dump(exclude_unset=True)
+    version_needed = "generated_sql" in data or "chart_type" in data or "config_json" in data
+    for key, value in data.items():
+        setattr(item, key, value)
+    item.updated_at = datetime.utcnow()
+    if version_needed:
+        version_number = (await db.scalar(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == item.id)) or 0) + 1
+        db.add(
+            ReportVersion(
+                report_id=item.id,
+                version_number=version_number,
+                generated_sql=item.generated_sql,
+                chart_type=item.chart_type,
+                config_json=item.config_json,
+                created_by=user.id,
+            )
+        )
+    await db.commit()
+    await db.refresh(item)
+    return await report_to_out(db, item)
+
+
+@router.post("/reports/{report_id}/run", response_model=ReportOut)
+async def run_report(report_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ReportOut:
+    item = await require_owned_report(db, report_id, user)
+    validation = await validate_sql(db, item.generated_sql, role=user.role)
+    if not validation.ok or not validation.validated_sql:
+        raise HTTPException(status_code=400, detail=validation.message)
+    started = datetime.utcnow()
+    rows = await execute_validated_select(validation.validated_sql)
+    item.result_snapshot = rows[:200]
+    item.updated_at = datetime.utcnow()
+    schedule = await db.scalar(select(Schedule).where(Schedule.report_id == item.id).order_by(Schedule.created_at.desc()))
+    if schedule:
+        schedule.last_run_at = datetime.utcnow()
+        schedule.next_run_at = next_run_at(schedule.frequency, schedule.run_at_time, schedule.day_of_week, schedule.day_of_month)
+        db.add(
+            ScheduleRun(
+                schedule_id=schedule.id,
+                report_id=item.id,
+                status="ok",
+                rows_returned=len(rows),
+                execution_ms=int((datetime.utcnow() - started).total_seconds() * 1000),
+                ran_at=datetime.utcnow(),
+            )
+        )
+    await db.commit()
+    await db.refresh(item)
+    return await report_to_out(db, item)
+
+
+@router.post("/reports/{report_id}/share", response_model=ReportOut)
+async def share_report(
+    report_id: UUID,
+    recipients: list[str],
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ReportOut:
+    item = await require_owned_report(db, report_id, user)
+    for email in recipients:
+        db.add(ReportRecipient(report_id=item.id, email=email))
+    await db.commit()
+    return await report_to_out(db, item)
+
+
+@router.post("/api/reports/{report_id}/schedule", response_model=ReportOut)
+async def schedule_report_legacy(
+    report_id: UUID,
+    payload: ScheduleRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ReportOut:
+    item = await require_owned_report(db, report_id, user)
+    schedule = Schedule(
+        report_id=item.id,
+        frequency=payload.frequency,
+        run_at_time=time(9, 0),
+        day_of_week=1 if payload.frequency == "weekly" else None,
+        is_active=True,
+    )
+    schedule.next_run_at = next_run_at(schedule.frequency, schedule.run_at_time, schedule.day_of_week, schedule.day_of_month)
+    db.add(schedule)
+    db.add(ReportRecipient(report_id=item.id, email=payload.email))
+    await db.commit()
+    return await report_to_out(db, item)
+
+
+@router.get("/schedules", response_model=list[ScheduleOut])
+async def list_schedules(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[ScheduleOut]:
+    rows = list(
+        (
+            await db.scalars(
+                select(Schedule)
+                .join(Report, Report.id == Schedule.report_id)
+                .where(Report.user_id == user.id)
+                .order_by(Schedule.next_run_at.asc().nullslast())
+            )
+        ).all()
+    )
+    return [await schedule_to_out(db, row) for row in rows]
+
+
+@router.post("/schedules", response_model=ScheduleOut)
+async def create_schedule(
+    payload: ScheduleCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ScheduleOut:
+    report = await require_owned_report(db, payload.report_id, user)
+    item = Schedule(
+        report_id=report.id,
+        frequency=payload.frequency,
+        run_at_time=payload.run_at_time or time(9, 0),
+        day_of_week=payload.day_of_week,
+        day_of_month=payload.day_of_month,
+        is_active=payload.is_active,
+    )
+    item.next_run_at = next_run_at(item.frequency, item.run_at_time, item.day_of_week, item.day_of_month)
+    db.add(item)
+    for email in payload.recipients:
+        db.add(ReportRecipient(report_id=report.id, email=email))
+    await db.commit()
+    await db.refresh(item)
+    return await schedule_to_out(db, item)
+
+
+@router.patch("/schedules/{schedule_id}", response_model=ScheduleOut)
+async def patch_schedule(
+    schedule_id: UUID,
+    payload: SchedulePatch,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ScheduleOut:
+    item = await db.get(Schedule, schedule_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Расписание не найдено")
+    report = await require_owned_report(db, item.report_id, user)
+    data = payload.model_dump(exclude_unset=True)
+    recipients = data.pop("recipients", None)
+    for key, value in data.items():
+        setattr(item, key, value)
+    item.next_run_at = next_run_at(item.frequency, item.run_at_time, item.day_of_week, item.day_of_month)
+    if recipients is not None:
+        for email in recipients:
+            db.add(ReportRecipient(report_id=report.id, email=email))
+    await db.commit()
+    await db.refresh(item)
+    return await schedule_to_out(db, item)
+
+
+@router.post("/schedules/{schedule_id}/toggle", response_model=ScheduleOut)
+async def toggle_schedule(schedule_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ScheduleOut:
+    item = await db.get(Schedule, schedule_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Расписание не найдено")
+    await require_owned_report(db, item.report_id, user)
+    item.is_active = not item.is_active
+    item.next_run_at = next_run_at(item.frequency, item.run_at_time, item.day_of_week, item.day_of_month) if item.is_active else None
+    await db.commit()
+    await db.refresh(item)
+    return await schedule_to_out(db, item)
+
+
+# Compatibility chat API for previous app shell.
+@router.get("/api/chats", response_model=list[ChatOut])
+async def list_chats(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[ChatOut]:
+    rows = list(
+        (
+            await db.scalars(
+                select(Chat).where(Chat.user_id == user.id).order_by(Chat.updated_at.desc(), Chat.id.desc())
+            )
+        ).all()
+    )
+    return [await chat_out(db, row) for row in rows]
 
 
 @router.post("/api/chats", response_model=ChatOut)
-def create_chat(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> ChatOut:
+async def create_chat(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ChatOut:
     chat = Chat(user_id=user.id, title="Новый запрос")
     db.add(chat)
-    db.commit()
-    db.refresh(chat)
-    return chat_out(db, chat)
+    await db.commit()
+    await db.refresh(chat)
+    return await chat_out(db, chat)
 
 
 @router.get("/api/chats/{chat_id}/messages", response_model=MessagesPage)
-def list_messages(
-    chat_id: int,
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
+async def list_messages(
+    chat_id: UUID,
+    limit: int = ApiQuery(default=50, ge=1, le=100),
+    offset: int = ApiQuery(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> MessagesPage:
-    require_owned_chat(db, chat_id, user)
-    total = db.query(func.count(Message.id)).filter(Message.chat_id == chat_id).scalar() or 0
-    latest = (
-        db.query(Message)
-        .filter(Message.chat_id == chat_id)
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+    await require_owned_chat(db, chat_id, user)
+    total = await db.scalar(select(func.count(Message.id)).where(Message.chat_id == chat_id))
+    rows = list(
+        (
+            await db.scalars(
+                select(Message)
+                .where(Message.chat_id == chat_id)
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
     )
-    items = list(reversed(latest))
+    items = list(reversed(rows))
     return MessagesPage(
         items=[MessageOut.model_validate(item) for item in items],
-        has_more=total > offset + len(latest),
-        next_offset=offset + len(latest),
+        has_more=(total or 0) > offset + len(rows),
+        next_offset=offset + len(rows),
     )
 
 
 @router.post("/api/chats/{chat_id}/messages", response_model=AssistantMessageResponse)
-def send_message(
-    chat_id: int,
+async def send_message(
+    chat_id: UUID,
     payload: SendMessageRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> AssistantMessageResponse:
-    chat = require_owned_chat(db, chat_id, user)
+    chat = await require_owned_chat(db, chat_id, user)
     question = payload.question.strip()
-    prior_count = db.query(func.count(Message.id)).filter(Message.chat_id == chat.id).scalar() or 0
+    prior_count = await db.scalar(select(func.count(Message.id)).where(Message.chat_id == chat.id))
     if prior_count == 0:
         chat.title = make_chat_title(question)
-
     user_message = Message(chat_id=chat.id, role="user", content=question, payload={})
     db.add(user_message)
-    db.flush()
-
-    context_rows = (
-        db.query(Message)
-        .filter(Message.chat_id == chat.id, Message.id != user_message.id)
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(10)
-        .all()
-    )
-    context = [
-        {"role": item.role, "content": item.content}
-        for item in reversed(context_rows)
-    ]
-
-    started = time.perf_counter()
-    generated_sql = ""
-    prompt = ""
-    raw_response = ""
-    status_text = "success"
-    error = ""
-
-    try:
-        generated = text_to_sql.generate(question, context)
-        generated_sql = generated.sql
-        prompt = generated.prompt
-        raw_response = generated.raw_response
-
-        if generated.confidence < 0.6:
-            status_text = "needs_clarification"
-            assistant_payload = {
-                "type": "clarification",
-                "question": question,
-                "interpretation": generated.interpretation,
-                "confidence": generated.confidence,
-                "sql": "",
-                "rows": [],
-                "chart_spec": {"type": "table_only"},
-            }
-            assistant_text = (
-                "Мне не хватает уверенности, чтобы безопасно построить SQL. "
-                "Уточните, пожалуйста, метрику, период и разрез."
-            )
-        else:
-            safe_sql, guardrail_notes = ensure_safe_sql(generated.sql)
-            generated_sql = safe_sql
-            rows = run_sql(safe_sql)
-            chart_spec = recommend_chart(rows)
-            assistant_payload = {
-                "type": "analysis",
-                "question": question,
-                "interpretation": generated.interpretation,
-                "confidence": generated.confidence,
-                "sql": safe_sql,
-                "guardrails": guardrail_notes,
-                "rows": rows,
-                "chart_spec": chart_spec,
-            }
-            assistant_text = generated.answer_intro
-
-    except GuardrailError as exc:
-        status_text = "blocked"
-        error = str(exc)
-        assistant_payload = {
-            "type": "blocked",
-            "question": question,
-            "interpretation": {},
-            "confidence": 1,
-            "sql": generated_sql,
-            "guardrails": [str(exc)],
-            "rows": [],
-            "chart_spec": {"type": "table_only"},
-        }
-        assistant_text = f"{exc} Переформулируйте запрос как аналитический SELECT-вопрос."
-    except Exception as exc:
-        status_text = "error"
-        error = str(exc)
-        assistant_payload = {
-            "type": "error",
-            "question": question,
-            "interpretation": {},
-            "confidence": 0,
-            "sql": generated_sql,
-            "rows": [],
-            "chart_spec": {"type": "table_only"},
-        }
-        assistant_text = "Не получилось выполнить запрос. Детали доступны администратору в логах."
-
-    duration_ms = int((time.perf_counter() - started) * 1000)
+    await db.flush()
+    query = await run_query_workflow(db, user, question, chat_id)
+    query_payload = (await query_to_out(db, query)).model_dump(mode="json")
     assistant_message = Message(
         chat_id=chat.id,
         role="assistant",
-        content=assistant_text,
-        payload=assistant_payload,
+        content=query.ai_answer,
+        payload={**query_payload, "type": query.status, "rows": query.result_snapshot, "sql": query.corrected_sql or query.generated_sql},
     )
     chat.updated_at = datetime.utcnow()
     db.add(assistant_message)
-    db.add(
-        QueryLog(
-            user_id=user.id,
-            chat_id=chat.id,
-            question=question,
-            generated_sql=generated_sql,
-            status=status_text,
-            duration_ms=duration_ms,
-            prompt=prompt,
-            raw_response=raw_response,
-            error=error,
-        )
-    )
-    db.commit()
-    db.refresh(chat)
-    db.refresh(user_message)
-    db.refresh(assistant_message)
-
+    await db.commit()
+    await db.refresh(chat)
+    await db.refresh(user_message)
+    await db.refresh(assistant_message)
     return AssistantMessageResponse(
-        chat=chat_out(db, chat),
+        chat=await chat_out(db, chat),
         user_message=MessageOut.model_validate(user_message),
         assistant_message=MessageOut.model_validate(assistant_message),
     )
 
 
-@router.get("/api/templates", response_model=list[TemplateOut])
-def list_templates(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> list[TemplateOut]:
-    templates = (
-        db.query(Template)
-        .filter((Template.user_id.is_(None)) | (Template.user_id == user.id))
-        .order_by(Template.user_id.nullsfirst(), Template.id.asc())
-        .all()
-    )
-    return [TemplateOut.model_validate(item) for item in templates]
-
-
-@router.post("/api/templates", response_model=TemplateOut)
-def create_template(
-    payload: TemplateCreate,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> TemplateOut:
-    item = Template(user_id=user.id, title=payload.title, content=payload.content)
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return TemplateOut.model_validate(item)
-
-
-@router.get("/api/reports", response_model=list[ReportOut])
-def list_reports(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> list[ReportOut]:
-    items = (
-        db.query(Report)
-        .filter(Report.user_id == user.id)
-        .order_by(Report.created_at.desc(), Report.id.desc())
-        .limit(100)
-        .all()
-    )
-    return [ReportOut.model_validate(item) for item in items]
-
-
-@router.post("/api/reports", response_model=ReportOut)
-def create_report(
-    payload: ReportCreate,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> ReportOut:
-    if payload.chat_id:
-        require_owned_chat(db, payload.chat_id, user)
-    item = Report(
-        user_id=user.id,
-        chat_id=payload.chat_id,
-        title=payload.title,
-        question=payload.question,
-        sql_text=payload.sql_text,
-        result=payload.result,
-        chart_spec=payload.chart_spec,
-        schedule={},
-    )
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return ReportOut.model_validate(item)
-
-
-@router.post("/api/reports/{report_id}/schedule", response_model=ReportOut)
-def schedule_report(
-    report_id: int,
-    payload: ScheduleRequest,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> ReportOut:
-    item = db.get(Report, report_id)
-    if not item or item.user_id != user.id:
-        raise HTTPException(status_code=404, detail="Отчёт не найден")
-    item.schedule = {
-        "frequency": payload.frequency,
-        "email": payload.email,
-        "last_demo_log": f"Демо-рассылка запланирована: {payload.frequency} -> {payload.email}",
-    }
-    db.commit()
-    db.refresh(item)
-    return ReportOut.model_validate(item)
-
-
 @router.get("/admin/logs", response_model=list[LogOut])
-def admin_logs(
+async def admin_logs(
     user_email: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ) -> list[LogOut]:
-    query = db.query(QueryLog, User.email).outerjoin(User, User.id == QueryLog.user_id)
+    stmt = select(Query, User.email).outerjoin(User, User.id == Query.user_id)
     if user_email:
-        query = query.filter(User.email.ilike(f"%{user_email}%"))
+        stmt = stmt.where(User.email.ilike(f"%{user_email}%"))
     if date_from:
-        query = query.filter(QueryLog.created_at >= datetime.fromisoformat(date_from))
+        stmt = stmt.where(Query.created_at >= datetime.fromisoformat(date_from))
     if date_to:
-        query = query.filter(QueryLog.created_at <= datetime.fromisoformat(date_to))
-
-    rows = query.order_by(QueryLog.created_at.desc(), QueryLog.id.desc()).limit(300).all()
+        stmt = stmt.where(Query.created_at <= datetime.fromisoformat(date_to))
+    rows = (await db.execute(stmt.order_by(Query.created_at.desc()).limit(300))).all()
     return [
         LogOut(
-            id=log.id,
-            created_at=log.created_at,
+            id=query.id,
+            created_at=query.created_at,
             user_email=email,
-            question=log.question,
-            generated_sql=log.generated_sql,
-            status=log.status,
-            duration_ms=log.duration_ms,
-            prompt=log.prompt,
-            raw_response=log.raw_response,
-            error=log.error,
+            question=query.natural_text,
+            generated_sql=query.corrected_sql or query.generated_sql,
+            status=query.status,
+            duration_ms=query.execution_ms,
+            prompt=str(query.interpretation_json),
+            raw_response=str(query.sql_plan_json),
+            error=query.error_message or query.block_reason,
         )
-        for log, email in rows
+        for query, email in rows
     ]

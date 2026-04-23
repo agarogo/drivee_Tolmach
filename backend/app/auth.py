@@ -5,9 +5,10 @@ import json
 import os
 import time
 from typing import Any
+from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_db
@@ -89,9 +90,9 @@ def decode_access_token(token: str) -> dict[str, Any]:
         ) from exc
 
 
-def get_current_user(
+async def get_current_user(
     authorization: str | None = Header(default=None),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> User:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
@@ -101,8 +102,12 @@ def get_current_user(
 
     payload = decode_access_token(authorization.split(" ", 1)[1].strip())
     user_id = payload.get("sub")
-    user = db.get(User, int(user_id)) if user_id is not None else None
-    if not user:
+    try:
+        parsed_user_id = UUID(str(user_id)) if user_id is not None else None
+    except ValueError:
+        parsed_user_id = None
+    user = await db.get(User, parsed_user_id) if parsed_user_id is not None else None
+    if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Пользователь не найден",
@@ -110,7 +115,7 @@ def get_current_user(
     return user
 
 
-def require_admin(user: User = Depends(get_current_user)) -> User:
+async def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

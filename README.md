@@ -1,93 +1,169 @@
-# Толмач
+# Толмач by Drivee
 
-Self-service AI-аналитика: пользователь задаёт вопрос на русском, система строит безопасный SQL, выполняет его на демо-БД, показывает объяснение, таблицу и график.
+Production-like MVP self-service аналитики: пользователь задаёт вопрос на русском языке, система интерпретирует запрос, ищет бизнес-термины в semantic layer, считает confidence, генерирует безопасный read-only SQL, выполняет его в PostgreSQL, показывает explainability, таблицу, график, AI summary, отчёты и расписание.
 
 ## Стек
 
-- FastAPI + SQLAlchemy + PostgreSQL
-- JWT-авторизация с ролями `user` и `admin`
-- React + TypeScript + React Query + Recharts
-- Docker Compose для локального демо
-- Text-to-SQL через локальную Ollama: `qwen3:4b`
+- Backend: FastAPI, SQLAlchemy 2.0 async, asyncpg, Alembic, PostgreSQL.
+- Frontend: React/Vite, TypeScript, TanStack Query, Recharts.
+- AI workflow: interpreter, semantic retrieval, confidence scoring, SQL planner/generator, guardrails, safe executor, auto-fix, answer composer.
+- Observability: persisted `query_events` and `sql_guardrail_logs`, Phoenix/OpenTelemetry container in Docker Compose.
 
 ## Быстрый запуск
 
 ```bash
 cp .env.example .env
-ollama pull qwen3:4b
 docker compose up --build
 ```
 
-Откройте:
+Открыть:
 
 - Frontend: `http://localhost:5173`
 - Backend docs: `http://localhost:8000/docs`
+- Phoenix traces: `http://localhost:6006`
 
-При первом запуске backend создаёт таблицы и демо-данные: пользователей, города, заказы, отмены, шаблоны.
+При старте backend выполняет `alembic upgrade head`, затем seed-ит demo data.
+
+### Подключение к PostgreSQL
+
+Backend всегда использует `DATABASE_URL` из `.env`, если переменная задана. Это нужно для production/external PostgreSQL: миграции Alembic и seed выполняются именно в этой БД.
+
+Для локального compose можно оставить значение из `.env.example`:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/tolmach
+```
+
+Для внешней БД укажите DSN провайдера:
+
+```bash
+DATABASE_URL=postgresql://user:password@host:5432/database
+```
+
+Система нормализует `postgresql://` в async SQLAlchemy URL автоматически.
+
+### Если backend падает на миграции
+
+Если в логах есть `relation "cities" already exists`, значит Docker использует старый PostgreSQL volume с прежней demo-схемой. В `docker-compose.yml` задан отдельный named volume `drivee-tolmach-postgres-data`, чтобы новый MVP стартовал на чистой локальной БД без удаления старых данных.
+
+Если нужен полный сброс локальной БД с потерей данных, остановите compose и удалите volume:
+
+```bash
+docker compose down -v
+docker compose up --build
+```
 
 ## Демо-аккаунты
 
 - User: `user@tolmach.local` / `user123`
 - Admin: `admin@tolmach.local` / `admin123`
 
-Также можно зарегистрировать нового пользователя через форму. Роль по умолчанию `user`; для проверки админки в форме регистрации доступен выбор `admin`.
+## Структура
 
-## Переменные окружения
-
-См. `.env.example`.
-
-- `DATABASE_URL` - PostgreSQL DSN для backend
-- `JWT_SECRET` - секрет подписи JWT
-- `FRONTEND_ORIGIN` - origin фронтенда для CORS
-- `LLM_PROVIDER` - по умолчанию `ollama`
-- `LLM_MODEL` - по умолчанию `qwen3:4b`
-- `OLLAMA_BASE_URL` - адрес локальной Ollama. Для Docker Desktop используйте `http://host.docker.internal:11434`, для запуска backend без Docker - `http://localhost:11434`
-- `LLM_TEMPERATURE` - температура генерации SQL
-
-Перед запуском убедитесь, что Ollama отвечает:
-
-```bash
-ollama serve
-ollama pull qwen3:4b
+```text
+backend/
+  alembic/
+  app/
+    ai/                  # interpreter, retrieval, confidence, planner, generator, orchestrator
+    services/            # guardrails, safe executor, bootstrap
+    api.py
+    auth.py
+    config.py
+    db.py
+    models.py
+    schemas.py
+  tests/
+frontend/
+  src/
+    api.ts
+    types.ts
+    components.tsx
+    App.tsx
+docs/
+  architecture.md
+  demo_script.md
 ```
 
-## Что работает в демо
+## База данных
 
-1. Регистрация и вход.
-2. Кнопка `Новый запрос` создаёт новый чат.
-3. Шаблоны заполняют поле ввода:
-   - `Еженедельный KPI` -> `Покажи KPI за последнюю неделю по дням`
-   - `Отчёт по регионам` -> `Сравни отмены по федеральным округам`
-4. Запрос `покажи выручку по топ-10 городам за последние 30 дней` возвращает объяснение, SQL, таблицу и столбчатый график.
-5. История чатов сохраняется и загружается после перезагрузки.
-6. Сообщения открываются последними 50, при прокрутке вверх догружаются предыдущие.
-7. `DROP TABLE users` блокируется guardrails.
-8. Администратор видит `/admin/logs`: вопрос, SQL, статус, время, промпт, raw-ответ и ошибки.
-9. Ответ можно сохранить как отчёт и настроить демо-рассылку.
+- Public schema: Drivee dataset `orders`, `cities`, `drivers`, `clients`.
+- Если в production БД есть raw-таблица `train`, миграция `20260423_0002` использует её как источник фактов для `mart_orders` и `mart_tenders`; `orders` остаётся совместимой demo-таблицей.
+- Public read-only marts: `mart_orders`, `mart_tenders`, `mart_city_daily`, `mart_driver_daily`, `mart_client_daily`.
+- `tolmach` schema: `users`, `invites`, `refresh_tokens`, `queries`, `query_clarifications`, `query_events`, `sql_guardrail_logs`, `reports`, `report_versions`, `schedules`, `schedule_runs`, `report_recipients`, `templates`, `semantic_layer`, `semantic_examples`, `access_policies`, `chart_preferences`.
+
+Важно: одна строка dataset соответствует комбинации `order_id + tender_id`. Метрики уровня заказа считаются через `mart_orders` и `COUNT(DISTINCT order_id)`.
 
 ## API
 
-- `POST /auth/register`
 - `POST /auth/login`
 - `GET /auth/me`
-- `GET /api/chats`
-- `POST /api/chats`
-- `GET /api/chats/{chat_id}/messages?limit=50&offset=0`
-- `POST /api/chats/{chat_id}/messages`
-- `GET /api/templates`
-- `POST /api/templates`
-- `GET /api/reports`
-- `POST /api/reports`
-- `POST /api/reports/{report_id}/schedule`
-- `GET /admin/logs`
+- `POST /queries/run`
+- `POST /queries/{id}/clarify`
+- `GET /queries/history`
+- `GET /queries/{id}`
+- `POST /reports`
+- `GET /reports`
+- `GET /reports/{id}`
+- `PATCH /reports/{id}`
+- `POST /reports/{id}/run`
+- `POST /reports/{id}/share`
+- `GET /templates`
+- `POST /templates`
+- `GET /schedules`
+- `POST /schedules`
+- `PATCH /schedules/{id}`
+- `POST /schedules/{id}/toggle`
+- `GET /semantic-layer`
+- `POST /semantic-layer`
+- `GET /health`
+- `GET /metrics`
+- `GET /traces-link`
+
+Compatibility routes `/api/chats`, `/api/reports`, `/api/templates` оставлены для прежнего shell.
 
 ## Guardrails
 
-Перед выполнением SQL система:
+Перед выполнением SQL система проверяет:
 
-- разрешает только `SELECT` / `WITH`;
-- блокирует `DROP`, `DELETE`, `UPDATE`, `INSERT`, `ALTER`, `TRUNCATE` и другие опасные операции;
-- запрещает таблицы вне аналитического слоя;
-- запрещает колонки `password`, `password_hash`, `credit_card`, `ssn`;
-- добавляет `LIMIT 1000`, если лимит отсутствует;
-- выполняет запрос с `statement_timeout = 5000 ms`.
+- только `SELECT` / `WITH`;
+- denylist write/DDL keywords;
+- single statement;
+- parse tree через `sqlglot`;
+- table whitelist;
+- role-based `access_policies`;
+- forbidden columns;
+- запрет `SELECT *`;
+- limit injection/cap;
+- cost heuristics;
+- timeout через `statement_timeout`.
+
+Safe executor принимает только объект `ValidatedSQL`, который возвращает validator.
+
+## Confidence
+
+- High `>= 85`: SQL выполняется сразу.
+- Medium `55-84`: выполнение останавливается, UI показывает уточняющий вопрос.
+- Low/dangerous: clarify или blocked в зависимости от причины.
+
+## Проверки
+
+```bash
+python -m compileall backend/app backend/alembic
+$env:PYTHONPATH="backend"; python -m unittest discover backend/tests
+cd frontend
+npm run build
+```
+
+## Документация
+
+- Архитектура и Mermaid diagrams: `docs/architecture.md`
+- Демо-сценарий: `docs/demo_script.md`
+
+## Дальнейшие улучшения
+
+- Подключить реальный LLM provider к planner/generator как controlled node.
+- Добавить embeddings для semantic retrieval вместо MVP lexical scoring.
+- Подключить APScheduler/Celery для реального фонового запуска schedules.
+- Подключить Phoenix/OpenTelemetry exporter для внешних distributed traces.
+- Добавить RBAC UI для `access_policies` и semantic layer governance.
+- Добавить реальные CSV/PNG export jobs и email delivery.
