@@ -1,5 +1,5 @@
 import random
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from sqlalchemy import func, select
@@ -21,8 +21,6 @@ from app.models import (
     Report,
     ReportRecipient,
     ReportVersion,
-    Schedule,
-    ScheduleRun,
     SemanticExample,
     SemanticLayer,
     SemanticTerm,
@@ -894,31 +892,13 @@ LIMIT 10
             version_number=1,
             generated_sql=report.generated_sql,
             chart_type=report.chart_type,
+            chart_spec_json=report.chart_spec,
+            semantic_snapshot_json={},
             config_json=report.config_json,
             created_by=owner.id,
         )
     )
-    schedule = Schedule(
-        report_id=report.id,
-        frequency="weekly",
-        run_at_time=time(9, 0),
-        day_of_week=1,
-        next_run_at=datetime.utcnow() + timedelta(days=3),
-        is_active=True,
-    )
-    db.add(schedule)
     db.add(ReportRecipient(report_id=report.id, email="ops-team@drivee.example"))
-    await db.flush()
-    db.add(
-        ScheduleRun(
-            schedule_id=schedule.id,
-            report_id=report.id,
-            status="ok",
-            rows_returned=10,
-            execution_ms=184,
-            ran_at=datetime.utcnow() - timedelta(days=4),
-        )
-    )
 
 
 def _database_host(database_url: str) -> str:

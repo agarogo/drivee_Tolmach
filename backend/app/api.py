@@ -1,5 +1,4 @@
-from datetime import datetime, time, timedelta
-from typing import Any
+from datetime import datetime, time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery, status
@@ -17,6 +16,8 @@ from app.models import (
     QueryClarification,
     QueryEvent,
     Report,
+    ReportArtifact,
+    ReportDelivery,
     ReportRecipient,
     ReportVersion,
     Schedule,
@@ -59,10 +60,14 @@ from app.schemas import (
     QueryOut,
     QueryRunRequest,
     RegisterRequest,
+    ReportArtifactOut,
     ReportCreate,
+    ReportDeliveryOut,
     ReportOut,
     ReportPatch,
+    ReportRecipientOut,
     ReportVersionOut,
+    SchedulerSummaryOut,
     ScheduleCreate,
     ScheduleOut,
     SchedulePatch,
@@ -99,9 +104,18 @@ from app.semantic.service import (
     update_semantic_term_entry,
     validate_semantic_layer,
 )
-from app.services.guardrails import validate_sql
-from app.services.query_runner import execute_validated_query
-
+from app.reports import (
+    append_report_recipients,
+    build_semantic_snapshot_from_query,
+    create_report_version,
+    create_run_record,
+    execute_report_run,
+    get_scheduler_summary,
+    list_report_runs,
+    next_run_at,
+    parse_run_time,
+    replace_report_recipients,
+)
 router = APIRouter()
 settings = get_settings()
 
@@ -158,31 +172,10 @@ async def require_owned_report(db: AsyncSession, report_id: UUID, user: User) ->
     return item
 
 
-def next_run_at(frequency: str, run_at: time | None, day_of_week: int | None, day_of_month: int | None) -> datetime:
-    now = datetime.utcnow()
-    target_time = run_at or time(9, 0)
-    candidate = now.replace(hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0)
-    if frequency == "daily":
-        return candidate if candidate > now else candidate + timedelta(days=1)
-    if frequency == "weekly":
-        target_dow = day_of_week or 1
-        days = (target_dow - (now.isoweekday())) % 7
-        candidate = candidate + timedelta(days=days)
-        return candidate if candidate > now else candidate + timedelta(days=7)
-    target_day = min(day_of_month or 1, 28)
-    candidate = candidate.replace(day=target_day)
-    if candidate <= now:
-        candidate = (candidate.replace(day=1) + timedelta(days=32)).replace(day=target_day)
-    return candidate
-
-
-def parse_run_time(value: Any) -> time:
-    if isinstance(value, time):
-        return value
-    if isinstance(value, str) and value:
-        parts = value.split(":")
-        return time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    return time(9, 0)
+async def require_owned_schedule(db: AsyncSession, schedule_id: UUID, user: User) -> Schedule:
+    item = await require_owned_schedule(db, schedule_id, user)
+    await require_owned_report(db, item.report_id, user)
+    return item
 
 
 async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
@@ -240,6 +233,59 @@ async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
     )
 
 
+async def run_to_out(db: AsyncSession, item: ScheduleRun) -> ScheduleRunOut:
+    artifacts = list(
+        (
+            await db.scalars(
+                select(ReportArtifact).where(ReportArtifact.run_id == item.id).order_by(ReportArtifact.created_at.asc())
+            )
+        ).all()
+    )
+    deliveries = list(
+        (
+            await db.scalars(
+                select(ReportDelivery).where(ReportDelivery.run_id == item.id).order_by(ReportDelivery.created_at.asc())
+            )
+        ).all()
+    )
+    return ScheduleRunOut(
+        id=item.id,
+        schedule_id=item.schedule_id,
+        report_id=item.report_id,
+        report_version_id=item.report_version_id,
+        requested_by_user_id=item.requested_by_user_id,
+        trigger_type=item.trigger_type,
+        status=item.status,
+        queued_at=item.queued_at,
+        started_at=item.started_at,
+        finished_at=item.finished_at,
+        next_retry_at=item.next_retry_at,
+        retry_count=item.retry_count,
+        max_retries=item.max_retries,
+        retry_backoff_seconds=item.retry_backoff_seconds,
+        final_sql=item.final_sql,
+        chart_type=item.chart_type,
+        chart_spec_json=item.chart_spec_json,
+        semantic_snapshot_json=item.semantic_snapshot_json,
+        result_snapshot=item.result_snapshot,
+        execution_fingerprint=item.execution_fingerprint,
+        explain_plan_json=item.explain_plan_json,
+        explain_cost=float(item.explain_cost or 0),
+        validator_summary_json=item.validator_summary_json,
+        structured_error_json=item.structured_error_json,
+        stack_trace=item.stack_trace,
+        attempts_json=item.attempts_json,
+        artifact_summary_json=item.artifact_summary_json,
+        delivery_summary_json=item.delivery_summary_json,
+        rows_returned=item.rows_returned,
+        execution_ms=item.execution_ms,
+        error_message=item.error_message,
+        ran_at=item.ran_at,
+        artifacts=[ReportArtifactOut.model_validate(row, from_attributes=True) for row in artifacts],
+        deliveries=[ReportDeliveryOut.model_validate(row, from_attributes=True) for row in deliveries],
+    )
+
+
 async def schedule_to_out(db: AsyncSession, item: Schedule) -> ScheduleOut:
     report = await db.get(Report, item.report_id)
     recipients = list(
@@ -249,6 +295,7 @@ async def schedule_to_out(db: AsyncSession, item: Schedule) -> ScheduleOut:
             )
         ).all()
     )
+    recipient_out = [ReportRecipientOut.model_validate(row, from_attributes=True) for row in recipients]
     runs = list(
         (
             await db.scalars(
@@ -266,9 +313,14 @@ async def schedule_to_out(db: AsyncSession, item: Schedule) -> ScheduleOut:
         day_of_month=item.day_of_month,
         next_run_at=item.next_run_at,
         last_run_at=item.last_run_at,
+        max_retries=item.max_retries,
+        retry_backoff_seconds=item.retry_backoff_seconds,
+        last_error_message=item.last_error_message,
+        last_error_at=item.last_error_at,
         is_active=item.is_active,
-        recipients=[row.email for row in recipients],
-        runs=[ScheduleRunOut.model_validate(row, from_attributes=True) for row in runs],
+        recipients=[row.destination or row.email or "" for row in recipients if (row.destination or row.email)],
+        delivery_targets=recipient_out,
+        runs=[await run_to_out(db, row) for row in runs],
     )
 
 
@@ -276,6 +328,7 @@ async def report_to_out(db: AsyncSession, item: Report, include_detail: bool = T
     recipients = list((await db.scalars(select(ReportRecipient).where(ReportRecipient.report_id == item.id))).all())
     versions = []
     schedules = []
+    latest_runs: list[ScheduleRun] = []
     if include_detail:
         versions = list(
             (
@@ -292,6 +345,7 @@ async def report_to_out(db: AsyncSession, item: Report, include_detail: bool = T
             ).all()
         )
         schedules = [await schedule_to_out(db, row) for row in schedule_rows]
+        latest_runs = await list_report_runs(db, report_id=item.id, limit=10)
     first_schedule = schedules[0] if schedules else None
     return ReportOut(
         id=item.id,
@@ -300,14 +354,20 @@ async def report_to_out(db: AsyncSession, item: Report, include_detail: bool = T
         generated_sql=item.generated_sql,
         chart_type=item.chart_type,
         chart_spec=item.chart_spec,
+        semantic_snapshot_json=item.semantic_snapshot_json,
         result_snapshot=item.result_snapshot,
         config_json=item.config_json,
         is_active=item.is_active,
+        latest_version_number=item.latest_version_number,
+        last_run_at=item.last_run_at,
+        last_run_status=item.last_run_status,
         created_at=item.created_at,
         updated_at=item.updated_at,
-        recipients=[row.email for row in recipients],
+        recipients=[row.destination or row.email or "" for row in recipients if (row.destination or row.email)],
+        delivery_targets=[ReportRecipientOut.model_validate(row, from_attributes=True) for row in recipients],
         schedules=schedules,
         versions=[ReportVersionOut.model_validate(row, from_attributes=True) for row in versions],
+        latest_runs=[await run_to_out(db, row) for row in latest_runs],
         question=item.natural_text,
         sql_text=item.generated_sql,
         result=item.result_snapshot,
@@ -753,6 +813,7 @@ async def create_report(
     chart_spec = payload.chart_spec or (query.chart_spec if query else {})
     result_snapshot = payload.result_snapshot or payload.result or (query.result_snapshot if query else [])
     chart_type = payload.chart_type or (query.chart_type if query else "table_only")
+    semantic_snapshot = payload.semantic_snapshot or build_semantic_snapshot_from_query(query)
     item = Report(
         user_id=user.id,
         query_id=query.id if query else None,
@@ -761,23 +822,19 @@ async def create_report(
         generated_sql=generated_sql,
         chart_type=chart_type,
         chart_spec=chart_spec,
+        semantic_snapshot_json=semantic_snapshot,
         result_snapshot=result_snapshot,
         config_json=payload.config_json,
     )
     db.add(item)
     await db.flush()
-    db.add(
-        ReportVersion(
-            report_id=item.id,
-            version_number=1,
-            generated_sql=generated_sql,
-            chart_type=chart_type,
-            config_json=payload.config_json,
-            created_by=user.id,
-        )
+    await create_report_version(db, report=item, created_by=user.id)
+    await replace_report_recipients(
+        db,
+        report=item,
+        recipients=payload.recipients,
+        delivery_targets=[target.model_dump() for target in payload.delivery_targets],
     )
-    for email in payload.recipients:
-        db.add(ReportRecipient(report_id=item.id, email=email))
     if payload.schedule:
         schedule = Schedule(
             report_id=item.id,
@@ -785,6 +842,10 @@ async def create_report(
             run_at_time=parse_run_time(payload.schedule.get("run_at_time")),
             day_of_week=payload.schedule.get("day_of_week") or 1,
             day_of_month=payload.schedule.get("day_of_month"),
+            max_retries=int(payload.schedule.get("max_retries", settings.scheduler_default_max_retries)),
+            retry_backoff_seconds=int(
+                payload.schedule.get("retry_backoff_seconds", settings.scheduler_default_retry_backoff_seconds)
+            ),
             is_active=payload.schedule.get("is_active", True),
         )
         schedule.next_run_at = next_run_at(schedule.frequency, schedule.run_at_time, schedule.day_of_week, schedule.day_of_month)
@@ -821,22 +882,17 @@ async def patch_report(
 ) -> ReportOut:
     item = await require_owned_report(db, report_id, user)
     data = payload.model_dump(exclude_unset=True)
-    version_needed = "generated_sql" in data or "chart_type" in data or "config_json" in data
+    semantic_snapshot = data.pop("semantic_snapshot", None)
+    version_needed = any(
+        key in data for key in ("generated_sql", "chart_type", "chart_spec", "config_json")
+    ) or semantic_snapshot is not None
     for key, value in data.items():
         setattr(item, key, value)
+    if semantic_snapshot is not None:
+        item.semantic_snapshot_json = semantic_snapshot
     item.updated_at = datetime.utcnow()
     if version_needed:
-        version_number = (await db.scalar(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == item.id)) or 0) + 1
-        db.add(
-            ReportVersion(
-                report_id=item.id,
-                version_number=version_number,
-                generated_sql=item.generated_sql,
-                chart_type=item.chart_type,
-                config_json=item.config_json,
-                created_by=user.id,
-            )
-        )
+        await create_report_version(db, report=item, created_by=user.id)
     await db.commit()
     await db.refresh(item)
     return await report_to_out(db, item)
@@ -845,37 +901,52 @@ async def patch_report(
 @router.post("/reports/{report_id}/run", response_model=ReportOut)
 async def run_report(report_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ReportOut:
     item = await require_owned_report(db, report_id, user)
-    validation = await validate_sql(db, item.generated_sql, role=user.role)
-    if not validation.ok or not validation.validated_sql:
-        raise HTTPException(status_code=400, detail=validation.message)
-    started = datetime.utcnow()
-    execution_result = await execute_validated_query(
-        validation.validated_sql,
-        role=user.role,
-        db=db,
-        query_id=item.query_id,
-        use_cache=True,
+    run = await create_run_record(
+        db,
+        report=item,
+        schedule_id=None,
+        trigger_type="manual",
+        requested_by_user_id=user.id,
+        max_retries=0,
+        retry_backoff_seconds=0,
     )
-    rows = execution_result.rows
-    item.result_snapshot = rows[:200]
-    item.updated_at = datetime.utcnow()
-    schedule = await db.scalar(select(Schedule).where(Schedule.report_id == item.id).order_by(Schedule.created_at.desc()))
-    if schedule:
-        schedule.last_run_at = datetime.utcnow()
-        schedule.next_run_at = next_run_at(schedule.frequency, schedule.run_at_time, schedule.day_of_week, schedule.day_of_month)
-        db.add(
-            ScheduleRun(
-                schedule_id=schedule.id,
-                report_id=item.id,
-                status="ok",
-                rows_returned=len(rows),
-                execution_ms=execution_result.execution_ms or int((datetime.utcnow() - started).total_seconds() * 1000),
-                ran_at=datetime.utcnow(),
-            )
-        )
+    await execute_report_run(db, run.id)
     await db.commit()
     await db.refresh(item)
     return await report_to_out(db, item)
+
+
+@router.post("/reports/{report_id}/run-now", response_model=ScheduleRunOut)
+async def run_report_now(
+    report_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ScheduleRunOut:
+    item = await require_owned_report(db, report_id, user)
+    run = await create_run_record(
+        db,
+        report=item,
+        schedule_id=None,
+        trigger_type="manual",
+        requested_by_user_id=user.id,
+        max_retries=0,
+        retry_backoff_seconds=0,
+    )
+    run = await execute_report_run(db, run.id)
+    await db.commit()
+    return await run_to_out(db, run)
+
+
+@router.get("/reports/{report_id}/history", response_model=list[ScheduleRunOut])
+async def report_history(
+    report_id: UUID,
+    limit: int = ApiQuery(default=30, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[ScheduleRunOut]:
+    item = await require_owned_report(db, report_id, user)
+    rows = await list_report_runs(db, report_id=item.id, limit=limit)
+    return [await run_to_out(db, row) for row in rows]
 
 
 @router.post("/reports/{report_id}/share", response_model=ReportOut)
@@ -886,8 +957,7 @@ async def share_report(
     user: User = Depends(get_current_user),
 ) -> ReportOut:
     item = await require_owned_report(db, report_id, user)
-    for email in recipients:
-        db.add(ReportRecipient(report_id=item.id, email=email))
+    await append_report_recipients(db, report=item, recipients=recipients, delivery_targets=None)
     await db.commit()
     return await report_to_out(db, item)
 
@@ -905,11 +975,13 @@ async def schedule_report_legacy(
         frequency=payload.frequency,
         run_at_time=time(9, 0),
         day_of_week=1 if payload.frequency == "weekly" else None,
+        max_retries=settings.scheduler_default_max_retries,
+        retry_backoff_seconds=settings.scheduler_default_retry_backoff_seconds,
         is_active=True,
     )
     schedule.next_run_at = next_run_at(schedule.frequency, schedule.run_at_time, schedule.day_of_week, schedule.day_of_month)
     db.add(schedule)
-    db.add(ReportRecipient(report_id=item.id, email=payload.email))
+    await append_report_recipients(db, report=item, recipients=[payload.email], delivery_targets=None)
     await db.commit()
     return await report_to_out(db, item)
 
@@ -942,12 +1014,18 @@ async def create_schedule(
         run_at_time=payload.run_at_time or time(9, 0),
         day_of_week=payload.day_of_week,
         day_of_month=payload.day_of_month,
+        max_retries=payload.max_retries,
+        retry_backoff_seconds=payload.retry_backoff_seconds,
         is_active=payload.is_active,
     )
     item.next_run_at = next_run_at(item.frequency, item.run_at_time, item.day_of_week, item.day_of_month)
     db.add(item)
-    for email in payload.recipients:
-        db.add(ReportRecipient(report_id=report.id, email=email))
+    await append_report_recipients(
+        db,
+        report=report,
+        recipients=payload.recipients,
+        delivery_targets=[target.model_dump() for target in payload.delivery_targets],
+    )
     await db.commit()
     await db.refresh(item)
     return await schedule_to_out(db, item)
@@ -960,18 +1038,23 @@ async def patch_schedule(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> ScheduleOut:
-    item = await db.get(Schedule, schedule_id)
+    item = await require_owned_schedule(db, schedule_id, user)
     if not item:
         raise HTTPException(status_code=404, detail="Расписание не найдено")
     report = await require_owned_report(db, item.report_id, user)
     data = payload.model_dump(exclude_unset=True)
     recipients = data.pop("recipients", None)
+    delivery_targets = data.pop("delivery_targets", None)
     for key, value in data.items():
         setattr(item, key, value)
     item.next_run_at = next_run_at(item.frequency, item.run_at_time, item.day_of_week, item.day_of_month)
-    if recipients is not None:
-        for email in recipients:
-            db.add(ReportRecipient(report_id=report.id, email=email))
+    if recipients is not None or delivery_targets is not None:
+        await replace_report_recipients(
+            db,
+            report=report,
+            recipients=recipients,
+            delivery_targets=[target.model_dump() if hasattr(target, "model_dump") else target for target in (delivery_targets or [])],
+        )
     await db.commit()
     await db.refresh(item)
     return await schedule_to_out(db, item)
@@ -979,7 +1062,7 @@ async def patch_schedule(
 
 @router.post("/schedules/{schedule_id}/toggle", response_model=ScheduleOut)
 async def toggle_schedule(schedule_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ScheduleOut:
-    item = await db.get(Schedule, schedule_id)
+    item = await require_owned_schedule(db, schedule_id, user)
     if not item:
         raise HTTPException(status_code=404, detail="Расписание не найдено")
     await require_owned_report(db, item.report_id, user)
@@ -988,6 +1071,40 @@ async def toggle_schedule(schedule_id: UUID, db: AsyncSession = Depends(get_db),
     await db.commit()
     await db.refresh(item)
     return await schedule_to_out(db, item)
+
+
+@router.post("/schedules/{schedule_id}/run-now", response_model=ScheduleRunOut)
+async def run_schedule_now(
+    schedule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ScheduleRunOut:
+    item = await require_owned_schedule(db, schedule_id, user)
+    report = await require_owned_report(db, item.report_id, user)
+    run = await create_run_record(
+        db,
+        report=report,
+        schedule_id=item.id,
+        trigger_type="schedule_manual",
+        requested_by_user_id=user.id,
+        max_retries=item.max_retries,
+        retry_backoff_seconds=item.retry_backoff_seconds,
+    )
+    run = await execute_report_run(db, run.id)
+    await db.commit()
+    return await run_to_out(db, run)
+
+
+@router.get("/schedules/{schedule_id}/history", response_model=list[ScheduleRunOut])
+async def schedule_history(
+    schedule_id: UUID,
+    limit: int = ApiQuery(default=30, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[ScheduleRunOut]:
+    item = await require_owned_schedule(db, schedule_id, user)
+    rows = await list_report_runs(db, schedule_id=item.id, limit=limit)
+    return [await run_to_out(db, row) for row in rows]
 
 
 # Compatibility chat API for previous app shell.
@@ -1153,3 +1270,31 @@ async def admin_query_execution_benchmark_presets(
         BenchmarkPresetOut(key=item.key, title=item.title, question=item.question)
         for item in BENCHMARK_PRESETS
     ]
+
+
+@router.get("/admin/scheduler/summary", response_model=SchedulerSummaryOut)
+async def admin_scheduler_summary(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> SchedulerSummaryOut:
+    return SchedulerSummaryOut.model_validate(await get_scheduler_summary(db))
+
+
+@router.get("/admin/scheduler/runs", response_model=list[ScheduleRunOut])
+async def admin_scheduler_runs(
+    limit: int = ApiQuery(default=50, ge=1, le=200),
+    status_filter: str | None = None,
+    report_id: UUID | None = None,
+    schedule_id: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+) -> list[ScheduleRunOut]:
+    rows = await list_report_runs(
+        db,
+        report_id=report_id,
+        schedule_id=schedule_id,
+        limit=limit,
+    )
+    if status_filter:
+        rows = [row for row in rows if row.status == status_filter]
+    return [await run_to_out(db, row) for row in rows]

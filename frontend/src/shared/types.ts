@@ -1,3 +1,15 @@
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonObject
+  | JsonValue[];
+
+export type JsonObject = {
+  [key: string]: JsonValue;
+};
+
 export type User = {
   id: string;
   email: string;
@@ -15,7 +27,7 @@ export type RegisterPayload = {
   email: string;
   password: string;
   full_name: string;
-  role?: "user" | "admin";
+  role?: "user";
 };
 
 export type AppView = "analytics" | "reports" | "templates" | "schedules" | "profile";
@@ -31,11 +43,13 @@ export type QueryStatus =
   | "autofix_failed"
   | "clarified";
 
+export type ConfidenceBand = "high" | "medium" | "low";
+
 export type QueryEvent = {
   id: string;
   step_name: string;
   status: string;
-  payload_json: Record<string, any>;
+  payload_json: JsonObject;
   started_at: string;
   finished_at: string | null;
   duration_ms: number;
@@ -47,42 +61,70 @@ export type GuardrailLog = {
   status: string;
   severity: string;
   message: string;
-  details_json: Record<string, any>;
+  details_json: JsonObject;
   created_at: string;
+};
+
+export type ClarificationOption = {
+  label: string;
+  value: string;
+  description: string;
 };
 
 export type Clarification = {
   id: string;
   question_text: string;
-  options_json: Array<{ label: string; value: string; description: string }>;
+  options_json: ClarificationOption[];
   chosen_option: string;
   freeform_answer: string;
   created_at: string;
   answered_at: string | null;
 };
 
+export type BlockReason = {
+  code: string;
+  message: string;
+  details: JsonObject;
+};
+
+export type QueryChartSeries = {
+  key: string;
+  name: string;
+};
+
+export type QueryChartSpec = {
+  type?: string;
+  x?: string;
+  series?: QueryChartSeries[];
+  [key: string]: JsonValue | QueryChartSeries[] | undefined;
+};
+
+export type QueryResultRow = Record<string, string | number | boolean | null>;
+
 export type QueryResult = {
   id: string;
+  chat_id?: string | null;
   natural_text: string;
   generated_sql: string;
   corrected_sql: string;
   confidence_score: number;
-  confidence_band: "high" | "medium" | "low";
+  confidence_band: ConfidenceBand;
   status: QueryStatus;
   block_reason: string;
-  interpretation: Record<string, any>;
-  resolved_request: Record<string, any>;
-  semantic_terms: Array<Record<string, any>>;
-  sql_plan: Record<string, any>;
-  sql_explain_plan: Record<string, any>;
+  block_reasons: BlockReason[];
+  interpretation: JsonObject;
+  resolved_request: JsonObject;
+  semantic_terms: JsonObject[];
+  sql_plan: JsonObject;
+  sql_explain_plan: JsonObject;
   sql_explain_cost: number;
   confidence_reasons: string[];
   ambiguity_flags: string[];
   rows_returned: number;
   execution_ms: number;
   chart_type: string;
-  chart_spec: Record<string, any>;
-  result_snapshot: Array<Record<string, any>>;
+  chart_spec: QueryChartSpec;
+  result_snapshot: QueryResultRow[];
   ai_answer: string;
   error_message: string;
   auto_fix_attempts: number;
@@ -98,7 +140,7 @@ export type Template = {
   title: string;
   description: string;
   natural_text: string;
-  canonical_intent_json: Record<string, any>;
+  canonical_intent_json: JsonObject;
   category: string;
   chart_type: string;
   is_public: boolean;
@@ -111,7 +153,7 @@ export type ReportVersion = {
   version_number: number;
   generated_sql: string;
   chart_type: string;
-  config_json: Record<string, any>;
+  config_json: JsonObject;
   created_at: string;
 };
 
@@ -145,9 +187,9 @@ export type Report = {
   natural_text: string;
   generated_sql: string;
   chart_type: string;
-  chart_spec: Record<string, any>;
-  result_snapshot: Array<Record<string, any>>;
-  config_json: Record<string, any>;
+  chart_spec: QueryChartSpec;
+  result_snapshot: QueryResultRow[];
+  config_json: JsonObject;
   is_active: boolean;
   created_at: string;
   updated_at: string;
