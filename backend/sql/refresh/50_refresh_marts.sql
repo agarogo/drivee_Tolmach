@@ -1,0 +1,4 @@
+REFRESH MATERIALIZED VIEW mart.city_daily;
+REFRESH MATERIALIZED VIEW mart.driver_daily;
+REFRESH MATERIALIZED VIEW mart.client_daily;
+REFRESH MATERIALIZED VIEW mart.orders_kpi_daily;

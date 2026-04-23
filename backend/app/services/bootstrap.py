@@ -1,17 +1,22 @@
 import random
 from datetime import datetime, time, timedelta
+from urllib.parse import urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import hash_password
+from app.config import get_settings
 from app.models import (
     AccessPolicy,
+    ApprovedTemplate,
     ChartPreference,
     Chat,
     City,
     Client,
+    DimensionCatalog,
     Driver,
+    MetricCatalog,
     Order,
     Report,
     ReportRecipient,
@@ -20,9 +25,58 @@ from app.models import (
     ScheduleRun,
     SemanticExample,
     SemanticLayer,
+    SemanticTerm,
     Template,
     User,
 )
+from app.semantic.defaults import (
+    DEFAULT_APPROVED_TEMPLATES,
+    DEFAULT_DIMENSIONS,
+    DEFAULT_METRICS,
+    DEFAULT_SEMANTIC_EXAMPLES,
+    DEFAULT_SEMANTIC_TERMS,
+)
+
+settings = get_settings()
+
+
+def _metric_config(
+    *,
+    base_table: str,
+    expression: str,
+    time_field: str,
+    supported_dimensions: list[str],
+    default_chart_type: str,
+    default_order_direction: str,
+    value_type: str,
+) -> dict:
+    return {
+        "base_table": base_table,
+        "expression_by_base": {base_table: expression},
+        "time_field_by_base": {base_table: time_field},
+        "supported_dimensions": supported_dimensions,
+        "default_chart_type": default_chart_type,
+        "default_order_direction": default_order_direction,
+        "value_type": value_type,
+    }
+
+
+def _dimension_config(
+    *,
+    expressions_by_base: dict[str, str],
+    joins_by_base: dict[str, str] | None = None,
+    select_alias: str,
+    value_type: str,
+    allowed_operators: list[str],
+) -> dict:
+    return {
+        "expression_by_base": expressions_by_base,
+        "group_expression_by_base": expressions_by_base,
+        "joins_by_base": joins_by_base or {},
+        "select_alias": select_alias,
+        "value_type": value_type,
+        "allowed_operators": allowed_operators,
+    }
 
 
 DEFAULT_TEMPLATES = [
@@ -80,93 +134,207 @@ DEFAULT_TEMPLATES = [
 SEMANTIC_TERMS = [
     {
         "term": "выручка",
+        "semantic_key": "revenue",
+        "item_kind": "metric",
         "aliases": ["доход", "оборот", "сумма поездок", "gmv"],
-        "sql_expression": "SUM(mart_orders.price_order_local) FILTER (WHERE mart_orders.status_order = 'done')",
-        "table_name": "mart_orders",
+        "sql_expression": "SUM(fact.orders.price_order_local) FILTER (WHERE fact.orders.status_order = 'done')",
+        "table_name": "fact.orders",
         "description": "Сумма price_order_local только по завершённым поездкам.",
         "metric_type": "money",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="SUM(fo.price_order_local) FILTER (WHERE fo.status_order = 'done')",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="money",
+        ),
     },
     {
         "term": "заказы",
+        "semantic_key": "orders_count",
+        "item_kind": "metric",
         "aliases": ["количество заказов", "созданные заказы"],
-        "sql_expression": "COUNT(DISTINCT mart_orders.order_id)",
-        "table_name": "mart_orders",
+        "sql_expression": "COUNT(DISTINCT fact.orders.order_id)",
+        "table_name": "fact.orders",
         "description": "Уникальные order_id. Важно: одна строка dataset может быть order_id + tender_id.",
         "metric_type": "count",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="COUNT(DISTINCT fo.order_id)",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="count",
+        ),
     },
     {
         "term": "завершённые поездки",
+        "semantic_key": "completed_trips",
+        "item_kind": "metric",
         "aliases": ["поездки", "done trips", "выполненные поездки"],
-        "sql_expression": "COUNT(DISTINCT mart_orders.order_id) FILTER (WHERE mart_orders.status_order = 'done')",
-        "table_name": "mart_orders",
+        "sql_expression": "COUNT(DISTINCT fact.orders.order_id) FILTER (WHERE fact.orders.status_order = 'done')",
+        "table_name": "fact.orders",
         "description": "Уникальные завершённые заказы на уровне поездки.",
         "metric_type": "count",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.status_order = 'done')",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="count",
+        ),
     },
     {
         "term": "отмены клиентом",
+        "semantic_key": "client_cancellations",
+        "item_kind": "metric",
         "aliases": ["client cancel", "клиентские отмены"],
-        "sql_expression": "COUNT(DISTINCT mart_orders.order_id) FILTER (WHERE mart_orders.clientcancel_timestamp IS NOT NULL)",
-        "table_name": "mart_orders",
+        "sql_expression": "COUNT(DISTINCT fact.orders.order_id) FILTER (WHERE fact.orders.clientcancel_timestamp IS NOT NULL)",
+        "table_name": "fact.orders",
         "description": "Отмены, где заполнен clientcancel_timestamp.",
         "metric_type": "count",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.clientcancel_timestamp IS NOT NULL)",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="count",
+        ),
     },
     {
         "term": "отмены водителем",
+        "semantic_key": "driver_cancellations",
+        "item_kind": "metric",
         "aliases": ["driver cancel", "водительские отмены"],
-        "sql_expression": "COUNT(DISTINCT mart_orders.order_id) FILTER (WHERE mart_orders.drivercancel_timestamp IS NOT NULL)",
-        "table_name": "mart_orders",
+        "sql_expression": "COUNT(DISTINCT fact.orders.order_id) FILTER (WHERE fact.orders.drivercancel_timestamp IS NOT NULL)",
+        "table_name": "fact.orders",
         "description": "Отмены, где заполнен drivercancel_timestamp.",
         "metric_type": "count",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.drivercancel_timestamp IS NOT NULL)",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="count",
+        ),
     },
     {
         "term": "decline тендеров",
+        "semantic_key": "tender_decline_rate",
+        "item_kind": "metric",
         "aliases": ["доля decline", "отклонённые тендеры"],
-        "sql_expression": "AVG(CASE WHEN mart_tenders.status_tender = 'decline' THEN 1 ELSE 0 END)",
-        "table_name": "mart_tenders",
+        "sql_expression": "AVG(CASE WHEN fact.tenders.status_tender = 'decline' THEN 1 ELSE 0 END)",
+        "table_name": "fact.tenders",
         "description": "Доля отклонённых тендеров на уровне tender_id.",
         "metric_type": "ratio",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.tenders ft",
+            expression="ROUND(100 * AVG(CASE WHEN ft.status_tender = 'decline' THEN 1 ELSE 0 END), 2)",
+            time_field="ft.tender_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="ratio",
+        ),
     },
     {
         "term": "средний чек",
+        "semantic_key": "avg_check",
+        "item_kind": "metric",
         "aliases": ["avg check", "средняя цена"],
-        "sql_expression": "AVG(mart_orders.price_order_local) FILTER (WHERE mart_orders.status_order = 'done')",
-        "table_name": "mart_orders",
+        "sql_expression": "AVG(fact.orders.price_order_local) FILTER (WHERE fact.orders.status_order = 'done')",
+        "table_name": "fact.orders",
         "description": "Средняя price_order_local по завершённым поездкам.",
         "metric_type": "money",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="ROUND(AVG(fo.price_order_local) FILTER (WHERE fo.status_order = 'done'), 2)",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="money",
+        ),
     },
     {
         "term": "город",
+        "semantic_key": "city",
+        "item_kind": "dimension",
         "aliases": ["города", "city"],
-        "sql_expression": "cities.name",
-        "table_name": "cities",
+        "sql_expression": "dim.cities.city_name",
+        "table_name": "dim.cities",
         "description": "Справочник городов, join через city_id.",
         "metric_type": "dimension",
         "dimension_type": "category",
+        "semantic_config_json": _dimension_config(
+            expressions_by_base={
+                "fact.orders fo": "c.city_name",
+                "fact.tenders ft": "c.city_name",
+            },
+            joins_by_base={
+                "fact.orders fo": "JOIN dim.cities c ON c.city_id = fo.city_id",
+                "fact.tenders ft": "JOIN dim.cities c ON c.city_id = ft.city_id",
+            },
+            select_alias="city",
+            value_type="string",
+            allowed_operators=["eq", "in"],
+        ),
     },
     {
         "term": "день",
+        "semantic_key": "day",
+        "item_kind": "dimension",
         "aliases": ["по дням", "динамика", "date"],
-        "sql_expression": "DATE(mart_orders.order_timestamp)",
-        "table_name": "mart_orders",
+        "sql_expression": "DATE(fact.orders.order_timestamp)",
+        "table_name": "fact.orders",
         "description": "Дата заказа в UTC для дневной динамики.",
         "metric_type": "dimension",
         "dimension_type": "time",
+        "semantic_config_json": _dimension_config(
+            expressions_by_base={
+                "fact.orders fo": "DATE(fo.order_timestamp)",
+                "fact.tenders ft": "DATE(ft.tender_timestamp)",
+            },
+            select_alias="day",
+            value_type="date",
+            allowed_operators=["eq", "between"],
+        ),
     },
     {
         "term": "водители",
+        "semantic_key": "active_drivers",
+        "item_kind": "metric",
         "aliases": ["drivers", "активные водители"],
-        "sql_expression": "COUNT(DISTINCT mart_orders.driver_id) FILTER (WHERE mart_orders.status_order = 'done')",
-        "table_name": "mart_orders",
+        "sql_expression": "COUNT(DISTINCT fact.orders.driver_id) FILTER (WHERE fact.orders.status_order = 'done')",
+        "table_name": "fact.orders",
         "description": "Активные водители как уникальные driver_id с завершёнными поездками в фактах.",
         "metric_type": "count",
         "dimension_type": "",
+        "semantic_config_json": _metric_config(
+            base_table="fact.orders fo",
+            expression="COUNT(DISTINCT fo.driver_id) FILTER (WHERE fo.status_order = 'done')",
+            time_field="fo.order_timestamp",
+            supported_dimensions=["city", "day"],
+            default_chart_type="bar",
+            default_order_direction="desc",
+            value_type="count",
+        ),
     },
 ]
 
@@ -177,12 +345,12 @@ SEMANTIC_EXAMPLES = [
         "natural_text": "Покажи выручку по топ-10 городам за последние 30 дней",
         "canonical_intent_json": {"metric": "revenue", "dimensions": ["city"], "limit": 10},
         "sql_example": """
-SELECT c.name AS city,
-       SUM(mo.price_order_local) FILTER (WHERE mo.status_order = 'done') AS revenue
-FROM mart_orders mo
-JOIN cities c ON c.city_id = mo.city_id
-WHERE mo.order_timestamp >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY c.name
+SELECT c.city_name AS city,
+       SUM(fo.price_order_local) FILTER (WHERE fo.status_order = 'done') AS revenue
+FROM fact.orders fo
+JOIN dim.cities c ON c.city_id = fo.city_id
+WHERE fo.order_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY c.city_name
 ORDER BY revenue DESC
 LIMIT 10
 """.strip(),
@@ -193,12 +361,12 @@ LIMIT 10
         "natural_text": "Покажи отмены клиентом по городам за последний месяц",
         "canonical_intent_json": {"metric": "client_cancellations", "dimensions": ["city"]},
         "sql_example": """
-SELECT c.name AS city,
-       COUNT(DISTINCT mo.order_id) FILTER (WHERE mo.clientcancel_timestamp IS NOT NULL) AS client_cancellations
-FROM mart_orders mo
-JOIN cities c ON c.city_id = mo.city_id
-WHERE mo.order_timestamp >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY c.name
+SELECT c.city_name AS city,
+       COUNT(DISTINCT fo.order_id) FILTER (WHERE fo.clientcancel_timestamp IS NOT NULL) AS client_cancellations
+FROM fact.orders fo
+JOIN dim.cities c ON c.city_id = fo.city_id
+WHERE fo.order_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY c.city_name
 ORDER BY client_cancellations DESC
 LIMIT 20
 """.strip(),
@@ -209,12 +377,12 @@ LIMIT 20
         "natural_text": "Какая доля decline тендеров по городам за неделю",
         "canonical_intent_json": {"metric": "tender_decline_rate", "dimensions": ["city"]},
         "sql_example": """
-SELECT c.name AS city,
-       ROUND(100 * AVG(CASE WHEN mt.status_tender = 'decline' THEN 1 ELSE 0 END), 2) AS decline_rate_pct
-FROM mart_tenders mt
-JOIN cities c ON c.city_id = mt.city_id
-WHERE mt.tender_timestamp >= CURRENT_DATE - INTERVAL '7 days'
-GROUP BY c.name
+SELECT c.city_name AS city,
+       ROUND(100 * AVG(CASE WHEN ft.status_tender = 'decline' THEN 1 ELSE 0 END), 2) AS decline_rate_pct
+FROM fact.tenders ft
+JOIN dim.cities c ON c.city_id = ft.city_id
+WHERE ft.tender_timestamp >= CURRENT_DATE - INTERVAL '7 days'
+GROUP BY c.city_name
 ORDER BY decline_rate_pct DESC
 LIMIT 20
 """.strip(),
@@ -380,22 +548,162 @@ async def seed_drivee_dataset(db: AsyncSession) -> None:
 
 
 async def seed_semantics(db: AsyncSession) -> None:
+    for item in DEFAULT_METRICS:
+        exists = await db.scalar(select(MetricCatalog).where(MetricCatalog.metric_key == item["metric_key"]))
+        if not exists:
+            db.add(
+                MetricCatalog(
+                    metric_key=item["metric_key"],
+                    business_name=item["business_name"],
+                    description=item["description"],
+                    sql_expression_template=item["sql_expression_template"],
+                    grain=item["grain"],
+                    allowed_dimensions_json=item["allowed_dimensions"],
+                    allowed_filters_json=item["allowed_filters"],
+                    default_chart=item["default_chart"],
+                    safety_tags_json=item["safety_tags"],
+                    is_active=True,
+                )
+            )
+        else:
+            exists.business_name = item["business_name"]
+            exists.description = item["description"]
+            exists.sql_expression_template = item["sql_expression_template"]
+            exists.grain = item["grain"]
+            exists.allowed_dimensions_json = item["allowed_dimensions"]
+            exists.allowed_filters_json = item["allowed_filters"]
+            exists.default_chart = item["default_chart"]
+            exists.safety_tags_json = item["safety_tags"]
+            exists.is_active = True
+
+    for item in DEFAULT_DIMENSIONS:
+        exists = await db.scalar(select(DimensionCatalog).where(DimensionCatalog.dimension_key == item["dimension_key"]))
+        if not exists:
+            db.add(
+                DimensionCatalog(
+                    dimension_key=item["dimension_key"],
+                    business_name=item["business_name"],
+                    table_name=item["table_name"],
+                    column_name=item["column_name"],
+                    join_path=item["join_path"],
+                    data_type=item["data_type"],
+                    is_active=True,
+                )
+            )
+        else:
+            exists.business_name = item["business_name"]
+            exists.table_name = item["table_name"]
+            exists.column_name = item["column_name"]
+            exists.join_path = item["join_path"]
+            exists.data_type = item["data_type"]
+            exists.is_active = True
+
+    for item in DEFAULT_SEMANTIC_TERMS:
+        exists = await db.scalar(select(SemanticTerm).where(SemanticTerm.term == item["term"]))
+        if not exists:
+            db.add(
+                SemanticTerm(
+                    term=item["term"],
+                    aliases=item["aliases"],
+                    mapped_entity_type=item["mapped_entity_type"],
+                    mapped_entity_key=item["mapped_entity_key"],
+                    is_active=True,
+                )
+            )
+        else:
+            exists.aliases = item["aliases"]
+            exists.mapped_entity_type = item["mapped_entity_type"]
+            exists.mapped_entity_key = item["mapped_entity_key"]
+            exists.is_active = True
+
+    for item in DEFAULT_SEMANTIC_EXAMPLES:
+        exists = await db.scalar(select(SemanticExample).where(SemanticExample.title == item["title"]))
+        if not exists:
+            db.add(
+                SemanticExample(
+                    title=item["title"],
+                    natural_text=item["natural_text"],
+                    canonical_intent_json=item["canonical_intent_json"],
+                    sql_example=item["sql_example"],
+                    domain_tag=item["domain_tag"],
+                    metric_key=item["metric_key"],
+                    dimension_keys_json=item["dimension_keys"],
+                    filter_keys_json=item["filter_keys"],
+                    is_active=item["is_active"],
+                )
+            )
+        else:
+            exists.natural_text = item["natural_text"]
+            exists.canonical_intent_json = item["canonical_intent_json"]
+            exists.sql_example = item["sql_example"]
+            exists.domain_tag = item["domain_tag"]
+            exists.metric_key = item["metric_key"]
+            exists.dimension_keys_json = item["dimension_keys"]
+            exists.filter_keys_json = item["filter_keys"]
+            exists.is_active = item["is_active"]
+
+    for item in DEFAULT_APPROVED_TEMPLATES:
+        exists = await db.scalar(select(ApprovedTemplate).where(ApprovedTemplate.template_key == item["template_key"]))
+        if not exists:
+            db.add(
+                ApprovedTemplate(
+                    template_key=item["template_key"],
+                    title=item["title"],
+                    description=item["description"],
+                    natural_text=item["natural_text"],
+                    metric_key=item["metric_key"],
+                    dimension_keys_json=item["dimension_keys"],
+                    filter_keys_json=item["filter_keys"],
+                    canonical_intent_json=item["canonical_intent_json"],
+                    chart_type=item["chart_type"],
+                    category=item["category"],
+                    is_active=item["is_active"],
+                )
+            )
+        else:
+            exists.title = item["title"]
+            exists.description = item["description"]
+            exists.natural_text = item["natural_text"]
+            exists.metric_key = item["metric_key"]
+            exists.dimension_keys_json = item["dimension_keys"]
+            exists.filter_keys_json = item["filter_keys"]
+            exists.canonical_intent_json = item["canonical_intent_json"]
+            exists.chart_type = item["chart_type"]
+            exists.category = item["category"]
+            exists.is_active = item["is_active"]
+
     for item in SEMANTIC_TERMS:
         exists = await db.scalar(select(SemanticLayer).where(SemanticLayer.term == item["term"]))
         if not exists:
             db.add(SemanticLayer(**item))
         else:
+            exists.semantic_key = item["semantic_key"]
+            exists.item_kind = item["item_kind"]
             exists.aliases = item["aliases"]
             exists.sql_expression = item["sql_expression"]
             exists.table_name = item["table_name"]
             exists.description = item["description"]
             exists.metric_type = item["metric_type"]
             exists.dimension_type = item["dimension_type"]
+            exists.semantic_config_json = item["semantic_config_json"]
 
     for item in SEMANTIC_EXAMPLES:
         exists = await db.scalar(select(SemanticExample).where(SemanticExample.title == item["title"]))
         if not exists:
-            db.add(SemanticExample(**item))
+            db.add(
+                SemanticExample(
+                    **item,
+                    metric_key=str(item.get("canonical_intent_json", {}).get("metric", "")),
+                    dimension_keys_json=list(item.get("canonical_intent_json", {}).get("dimensions", [])),
+                    filter_keys_json=list(item.get("canonical_intent_json", {}).get("filter_keys", [])),
+                    is_active=True,
+                )
+            )
+        else:
+            exists.metric_key = str(item.get("canonical_intent_json", {}).get("metric", ""))
+            exists.dimension_keys_json = list(item.get("canonical_intent_json", {}).get("dimensions", []))
+            exists.filter_keys_json = list(item.get("canonical_intent_json", {}).get("filter_keys", []))
+            exists.is_active = True
 
     for item in DEFAULT_TEMPLATES:
         exists = await db.scalar(select(Template).where(Template.title == item["title"], Template.is_public.is_(True)))
@@ -403,39 +711,21 @@ async def seed_semantics(db: AsyncSession) -> None:
             db.add(Template(is_public=True, **item))
 
     all_columns = {
-        "orders": [
+        "dim.cities": ["city_id", "city_name", "country", "timezone", "is_active", "first_seen_at", "last_seen_at"],
+        "dim.drivers": ["driver_id", "city_id", "first_seen_at", "last_seen_at", "tenders_count", "completed_orders_count"],
+        "dim.clients": ["user_id", "city_id", "first_seen_at", "last_seen_at", "orders_count", "completed_orders_count"],
+        "fact.orders": [
             "order_id",
-            "tender_id",
             "city_id",
             "user_id",
             "driver_id",
+            "accepted_tender_id",
             "status_order",
-            "status_tender",
             "order_timestamp",
-            "tender_timestamp",
-            "driverdone_timestamp",
-            "clientcancel_timestamp",
-            "drivercancel_timestamp",
-            "distance_in_meters",
-            "duration_in_seconds",
-            "price_order_local",
-            "price_tender_local",
-            "price_start_local",
-        ],
-        "train": [
-            "order_id",
-            "tender_id",
-            "city_id",
-            "user_id",
-            "driver_id",
-            "offset_hours",
-            "status_order",
-            "status_tender",
-            "order_timestamp",
-            "tender_timestamp",
-            "driveraccept_timestamp",
-            "driverarrived_timestamp",
-            "driverstartride_timestamp",
+            "order_day",
+            "tender_count",
+            "declined_tenders_count",
+            "timeout_tenders_count",
             "driverdone_timestamp",
             "clientcancel_timestamp",
             "drivercancel_timestamp",
@@ -444,27 +734,8 @@ async def seed_semantics(db: AsyncSession) -> None:
             "distance_in_meters",
             "duration_in_seconds",
             "price_order_local",
-            "price_tender_local",
-            "price_start_local",
         ],
-        "cities": ["city_id", "name", "country", "timezone", "is_active"],
-        "drivers": ["driver_id", "city_id", "rating", "status", "registered_at", "total_trips"],
-        "clients": ["user_id", "city_id", "registered_at", "total_orders", "is_active"],
-        "mart_orders": [
-            "order_id",
-            "city_id",
-            "user_id",
-            "driver_id",
-            "status_order",
-            "order_timestamp",
-            "driverdone_timestamp",
-            "clientcancel_timestamp",
-            "drivercancel_timestamp",
-            "distance_in_meters",
-            "duration_in_seconds",
-            "price_order_local",
-        ],
-        "mart_tenders": [
+        "fact.tenders": [
             "order_id",
             "tender_id",
             "city_id",
@@ -472,23 +743,99 @@ async def seed_semantics(db: AsyncSession) -> None:
             "driver_id",
             "status_tender",
             "tender_timestamp",
+            "tender_day",
+            "driveraccept_timestamp",
+            "driverarrived_timestamp",
+            "driverstartride_timestamp",
+            "driverdone_timestamp",
+            "clientcancel_timestamp",
+            "drivercancel_timestamp",
+            "order_modified_local",
+            "cancel_before_accept_local",
             "price_tender_local",
             "price_start_local",
         ],
-        "mart_city_daily": [
+        "mart.city_daily": [
             "day",
             "city_id",
             "orders_count",
             "completed_trips",
             "client_cancellations",
             "driver_cancellations",
+            "active_drivers",
             "revenue",
             "avg_check",
             "avg_duration_seconds",
             "avg_distance_meters",
+            "tenders_count",
+            "declined_tenders_count",
+            "tender_decline_rate",
         ],
-        "mart_driver_daily": ["day", "driver_id", "city_id", "completed_trips", "revenue", "driver_cancellations"],
-        "mart_client_daily": ["day", "user_id", "city_id", "orders_count", "completed_trips", "client_cancellations"],
+        "mart.driver_daily": [
+            "day",
+            "driver_id",
+            "city_id",
+            "orders_count",
+            "completed_trips",
+            "driver_cancellations",
+            "revenue",
+        ],
+        "mart.client_daily": [
+            "day",
+            "user_id",
+            "city_id",
+            "orders_count",
+            "completed_trips",
+            "client_cancellations",
+            "revenue",
+        ],
+        "mart.orders_kpi_daily": [
+            "day",
+            "orders_count",
+            "completed_trips",
+            "client_cancellations",
+            "driver_cancellations",
+            "active_drivers",
+            "active_cities",
+            "revenue",
+            "avg_check",
+            "avg_duration_seconds",
+            "avg_distance_meters",
+            "tenders_count",
+            "declined_tenders_count",
+            "tender_decline_rate",
+        ],
+        "raw.train_raw": [
+            "order_id_raw",
+            "tender_id_raw",
+            "city_id_raw",
+            "user_id_raw",
+            "driver_id_raw",
+            "status_order_raw",
+            "status_tender_raw",
+            "order_timestamp_raw",
+            "tender_timestamp_raw",
+        ],
+        "staging.train_typed": [
+            "order_id",
+            "tender_id",
+            "city_id",
+            "user_id",
+            "driver_id",
+            "status_order",
+            "status_tender",
+            "order_timestamp",
+            "tender_timestamp",
+            "driverdone_timestamp",
+            "clientcancel_timestamp",
+            "drivercancel_timestamp",
+            "distance_in_meters",
+            "duration_in_seconds",
+            "price_order_local",
+            "price_tender_local",
+            "price_start_local",
+            "is_valid",
+        ],
     }
     for role in ["user", "admin"]:
         for table, columns in all_columns.items():
@@ -525,12 +872,12 @@ async def seed_demo_report(db: AsyncSession, users: list[User]) -> None:
         title="Еженедельная выручка по городам",
         natural_text="Покажи выручку по топ-10 городам за последние 30 дней",
         generated_sql="""
-SELECT c.name AS city,
-       SUM(mo.price_order_local) FILTER (WHERE mo.status_order = 'done') AS revenue
-FROM mart_orders mo
-JOIN cities c ON c.city_id = mo.city_id
-WHERE mo.order_timestamp >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY c.name
+SELECT c.city_name AS city,
+       SUM(fo.price_order_local) FILTER (WHERE fo.status_order = 'done') AS revenue
+FROM fact.orders fo
+JOIN dim.cities c ON c.city_id = fo.city_id
+WHERE fo.order_timestamp >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY c.city_name
 ORDER BY revenue DESC
 LIMIT 10
 """.strip(),
@@ -574,7 +921,23 @@ LIMIT 10
     )
 
 
-async def bootstrap_demo_data(db: AsyncSession) -> None:
+def _database_host(database_url: str) -> str:
+    parsed = urlparse(database_url.replace("+asyncpg", ""))
+    return (parsed.hostname or "").lower()
+
+
+def _is_local_database(database_url: str) -> bool:
+    return _database_host(database_url) in {"", "db", "localhost", "127.0.0.1"}
+
+
+async def bootstrap_demo_data(db: AsyncSession, allow_nonlocal: bool = False) -> None:
+    if settings.is_production:
+        raise RuntimeError("Demo bootstrap is disabled when APP_ENV=production.")
+    if not allow_nonlocal and not settings.demo_bootstrap_allow_nonlocal and not _is_local_database(settings.database_url):
+        raise RuntimeError(
+            "Demo bootstrap is blocked for non-local databases. "
+            "Use a local PostgreSQL DSN or pass allow_nonlocal explicitly."
+        )
     users = await seed_users(db)
     await seed_drivee_dataset(db)
     await seed_semantics(db)

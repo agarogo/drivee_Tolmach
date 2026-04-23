@@ -29,6 +29,13 @@ class Interpretation:
     ambiguity_flags: list[str] = field(default_factory=list)
     dangerous: bool = False
     dangerous_reason: str = ""
+    clarification_question: str = ""
+    clarification_options: list[dict[str, Any]] = field(default_factory=list)
+    reasoning: str = ""
+    source: str = "unknown"
+    provider_confidence: float = 0.0
+    fallback_used: bool = False
+    clarification_reasons: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +52,13 @@ class Interpretation:
             "ambiguity_flags": self.ambiguity_flags,
             "dangerous": self.dangerous,
             "dangerous_reason": self.dangerous_reason,
+            "clarification_question": self.clarification_question,
+            "clarification_options": self.clarification_options,
+            "reasoning": self.reasoning,
+            "source": self.source,
+            "provider_confidence": self.provider_confidence,
+            "fallback_used": self.fallback_used,
+            "clarification_reasons": self.clarification_reasons,
         }
 
 
@@ -53,12 +67,18 @@ class RetrievalResult:
     semantic_terms: list[dict[str, Any]]
     templates: list[dict[str, Any]]
     examples: list[dict[str, Any]]
+    planner_candidates: list[dict[str, Any]] = field(default_factory=list)
+    retrieval_mode: str = "lexical_pg_trgm"
+    retrieval_explainability: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "semantic_terms": self.semantic_terms,
             "templates": self.templates,
             "examples": self.examples,
+            "planner_candidates": self.planner_candidates,
+            "retrieval_mode": self.retrieval_mode,
+            "retrieval_explainability": self.retrieval_explainability,
         }
 
 
@@ -91,13 +111,20 @@ class SqlPlan:
     limit: int
     chart_type: str
     explanation: list[str]
+    metric_label: str = ""
+    dimension_labels: dict[str, str] = field(default_factory=dict)
+    ast_json: dict[str, Any] = field(default_factory=dict)
+    planner_notes: list[dict[str, Any]] = field(default_factory=list)
+    clarification_reasons: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "metric": self.metric,
+            "metric_label": self.metric_label,
             "metric_expression": self.metric_expression,
             "source_table": self.source_table,
             "dimensions": self.dimensions,
+            "dimension_labels": self.dimension_labels,
             "joins": self.joins,
             "filters": self.filters,
             "group_by": self.group_by,
@@ -105,4 +132,7 @@ class SqlPlan:
             "limit": self.limit,
             "chart_type": self.chart_type,
             "explanation": self.explanation,
+            "ast_json": self.ast_json,
+            "planner_notes": self.planner_notes,
+            "clarification_reasons": self.clarification_reasons,
         }

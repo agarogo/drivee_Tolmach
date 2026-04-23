@@ -71,8 +71,11 @@ export type QueryResult = {
   status: QueryStatus;
   block_reason: string;
   interpretation: Record<string, any>;
+  resolved_request: Record<string, any>;
   semantic_terms: Array<Record<string, any>>;
   sql_plan: Record<string, any>;
+  sql_explain_plan: Record<string, any>;
+  sql_explain_cost: number;
   confidence_reasons: string[];
   ambiguity_flags: string[];
   rows_returned: number;

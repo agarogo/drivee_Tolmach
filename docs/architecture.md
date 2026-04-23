@@ -51,22 +51,23 @@ flowchart TD
     B --> C[Analytics home]
     C --> D[Templates, history, hints]
     D --> E[User enters Russian question]
-    E --> F[LLM/hybrid workflow generates SQL plan]
-    F --> G{Confidence high?}
-    G -->|No| H[Clarification question]
-    H --> E
-    G -->|Yes| I{Guardrails safe?}
-    I -->|No| J[Blocked request]
-    I -->|Yes| K[Read-only SQL execution]
-    K --> L{Result received?}
-    L -->|No| M[Auto-fix SQL max 2]
-    M -->|Fixed| K
-    M -->|Failed| N[Error with help]
-    L -->|Yes| O[Query result page]
-    O --> P[Explainability, SQL, confidence, table, chart, AI answer]
-    P --> Q[Save report]
-    Q --> R[Configure schedule]
-    R --> S[Reports and Schedule pages]
+    E --> F[LLM extracts structured intent]
+    F --> G[Server compiler builds semantic SQL plan]
+    G --> H{Confidence high?}
+    H -->|No| I[Clarification question]
+    I --> E
+    H -->|Yes| J{Guardrails + EXPLAIN cost safe?}
+    J -->|No| K[Blocked request]
+    J -->|Yes| L[Read-only SQL execution]
+    L --> M{Result received?}
+    M -->|No| N[Auto-fix SQL max 2]
+    N -->|Fixed| L
+    N -->|Failed| O[Error with help]
+    M -->|Yes| P[Query result page]
+    P --> Q[Explainability, semantic plan, DB explain, SQL, confidence, table, chart, AI answer]
+    Q --> R[Save report]
+    R --> S[Configure schedule]
+    S --> T[Reports and Schedule pages]
 ```
 
 ## Database ER Diagram
@@ -133,6 +134,8 @@ stateDiagram-v2
 ## MVP Decisions
 
 - The UI remains on React/Vite to keep delivery focused inside the existing project.
-- The AI contour is a deterministic hybrid orchestrator with clear traceability; LLM provider can be plugged into interpreter/generator later.
+- The AI contour now uses a real LLM as the primary structured-intent node; regex/rule logic remains only as a fallback path.
+- LLM output is never executed as SQL directly; the server compiles SQL from semantic-layer keys and then validates it.
+- Guardrails include EXPLAIN-based cost gating before execution.
 - Auto-fix is intentionally capped at 2 attempts.
 - Phoenix/OpenTelemetry runs in Docker Compose; persisted traces stay available for developers without cluttering the main chat UI.

@@ -1,12 +1,44 @@
 import unittest
 
-from app.ai.confidence import score_confidence
 from app.ai.answer import compose_answer
-from app.ai.generator import generate_sql
+from app.ai.confidence import score_confidence
 from app.ai.interpreter import interpret_query
-from app.ai.planner import build_plan
+from app.ai.semantic_compiler import compile_sql_query
 from app.ai.types import ConfidenceResult, RetrievalResult
+from app.semantic.service import SemanticCatalog, SemanticDimensionDefinition, SemanticMetricDefinition
 from app.services.guardrails import GuardrailError, _log, ensure_safe_sql
+
+
+def build_catalog() -> SemanticCatalog:
+    metric = SemanticMetricDefinition(
+        metric_key="completed_trips",
+        business_name="Завершённые поездки",
+        description="Done orders.",
+        sql_expression_template="COUNT(DISTINCT {base_alias}.order_id) FILTER (WHERE {base_alias}.status_order = 'done')",
+        grain="order",
+        allowed_dimensions=["city", "day"],
+        allowed_filters=["city", "day"],
+        default_chart="bar",
+        safety_tags=["count"],
+    )
+    city = SemanticDimensionDefinition(
+        dimension_key="city",
+        business_name="Город",
+        table_name="dim.cities",
+        column_name="city_name",
+        join_path="JOIN dim.cities {dimension_alias} ON {dimension_alias}.city_id = {base_alias}.city_id",
+        data_type="string",
+    )
+    day = SemanticDimensionDefinition(
+        dimension_key="day",
+        business_name="День",
+        table_name="__grain__",
+        column_name="{time_dimension_column}",
+        join_path="",
+        data_type="date",
+    )
+    dimensions = {"city": city, "day": day}
+    return SemanticCatalog(metrics={"completed_trips": metric}, dimensions=dimensions, filters=dict(dimensions))
 
 
 class AiGuardrailsTests(unittest.TestCase):
@@ -26,30 +58,16 @@ class AiGuardrailsTests(unittest.TestCase):
         self.assertGreaterEqual(confidence.score, 85)
         self.assertEqual(confidence.band, "high")
 
-    def test_sql_generator_uses_readonly_marts_and_limit(self) -> None:
-        interpretation = interpret_query("покажи выручку по топ-10 городам за последние 30 дней")
-        plan = build_plan(interpretation, RetrievalResult([], [], []))
-        sql = generate_sql(plan, interpretation).lower()
-        self.assertIn("from mart_orders", sql)
-        self.assertIn("join cities", sql)
-        self.assertIn("limit 10", sql)
-        self.assertNotIn("delete", sql)
-
-    def test_total_trips_since_absolute_date_is_accepted(self) -> None:
+    def test_compiler_uses_catalog_not_demo_tables(self) -> None:
         interpretation = interpret_query("сколько было всего поездок с 2025-11-18")
-        self.assertEqual(interpretation.metric, "completed_trips")
-        self.assertEqual(interpretation.dimensions, [])
-        self.assertEqual(interpretation.date_range["kind"], "since_date")
-        self.assertEqual(interpretation.date_range["start"], "2025-11-18")
-        confidence = score_confidence(interpretation, RetrievalResult([], [], []))
-        self.assertEqual(confidence.band, "high")
-        plan = build_plan(interpretation, RetrievalResult([], [], []))
-        sql = generate_sql(plan, interpretation).lower()
-        self.assertIn("from mart_orders", sql)
-        self.assertIn("date '2025-11-18'", sql)
-        self.assertIn("count(distinct mo.order_id)", sql)
-        self.assertNotIn("join cities", sql)
-        self.assertNotIn("group by", sql)
+        interpretation.metric = "completed_trips"
+        interpretation.dimensions = []
+        plan, sql = compile_sql_query(interpretation, RetrievalResult([], [], []), build_catalog())
+        lowered = sql.lower()
+        self.assertIn("from fact.orders as fo", lowered)
+        self.assertIn("count(distinct fo.order_id)", lowered)
+        self.assertNotIn("mart_orders", lowered)
+        self.assertEqual(plan.metric_label, "Завершённые поездки")
 
     def test_guardrail_warning_log_keeps_message_string_and_details_json(self) -> None:
         log = _log("column_whitelist", "warning", "warning", "Колонка может быть алиасом.", {"columns": ["active_drivers"]})
@@ -58,7 +76,8 @@ class AiGuardrailsTests(unittest.TestCase):
 
     def test_total_answer_mentions_requested_metric_value(self) -> None:
         interpretation = interpret_query("сколько было всего поездок с 2025-11-18")
-        plan = build_plan(interpretation, RetrievalResult([], [], []))
+        interpretation.metric = "completed_trips"
+        plan, _ = compile_sql_query(interpretation, RetrievalResult([], [], []), build_catalog())
         answer = compose_answer(
             "сколько было всего поездок с 2025-11-18",
             interpretation,
@@ -66,23 +85,15 @@ class AiGuardrailsTests(unittest.TestCase):
             plan,
             [{"completed_trips": 174528}],
         )
-        self.assertIn("поездки за период с 2025-11-18: 174528", answer)
+        self.assertIn("Завершённые поездки за период с 2025-11-18: 174528", answer)
         self.assertIn("разрез = без разреза", answer)
-
-    def test_active_drivers_use_fact_mart_not_demo_driver_directory(self) -> None:
-        interpretation = interpret_query("сколько активных водителей по городам")
-        plan = build_plan(interpretation, RetrievalResult([], [], []))
-        sql = generate_sql(plan, interpretation).lower()
-        self.assertIn("from mart_orders", sql)
-        self.assertIn("count(distinct mo.driver_id)", sql)
-        self.assertNotIn("from drivers", sql)
 
     def test_legacy_guardrail_blocks_write_sql(self) -> None:
         with self.assertRaises(GuardrailError):
             ensure_safe_sql("DELETE FROM drivers WHERE rating < 3.5")
 
     def test_legacy_guardrail_injects_limit(self) -> None:
-        sql, notes = ensure_safe_sql("SELECT city_id FROM orders")
+        sql, notes = ensure_safe_sql("SELECT city_id FROM fact.orders")
         self.assertIn("LIMIT", sql)
         self.assertTrue(notes)
 

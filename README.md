@@ -22,11 +22,13 @@ docker compose up --build
 - Backend docs: `http://localhost:8000/docs`
 - Phoenix traces: `http://localhost:6006`
 
-При старте backend выполняет `alembic upgrade head`, затем seed-ит demo data.
+При старте backend выполняет только `alembic upgrade head`.
+Demo data больше не seed-ится автоматически и запускается только явно через `python -m app.bootstrap_cli`.
 
 ### Подключение к PostgreSQL
 
-Backend всегда использует `DATABASE_URL` из `.env`, если переменная задана. Это нужно для production/external PostgreSQL: миграции Alembic и seed выполняются именно в этой БД.
+Backend всегда использует `DATABASE_URL` из `.env`, если переменная задана. Это нужно для production/external PostgreSQL: миграции Alembic выполняются именно в этой БД.
+Demo bootstrap по умолчанию блокируется для non-local DSN.
 
 Для локального compose можно оставить значение из `.env.example`:
 

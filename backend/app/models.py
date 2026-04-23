@@ -2,14 +2,14 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, Time
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, Time, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
 
-PLATFORM_SCHEMA = "tolmach"
+PLATFORM_SCHEMA = "app"
 
 
 def utcnow() -> datetime:
@@ -53,12 +53,12 @@ class Invite(PlatformBase, Base):
     role: Mapped[str] = mapped_column(String(20), default="user")
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tolmach.users.id"),
+        ForeignKey("app.users.id"),
         nullable=True,
     )
     used_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tolmach.users.id"),
+        ForeignKey("app.users.id"),
         nullable=True,
     )
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -70,7 +70,7 @@ class RefreshToken(PlatformBase, Base):
     __tablename__ = "refresh_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.users.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(255))
     device_hint: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -84,7 +84,7 @@ class Chat(PlatformBase, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tolmach.users.id", ondelete="CASCADE"),
+        ForeignKey("app.users.id", ondelete="CASCADE"),
         index=True,
     )
     title: Mapped[str] = mapped_column(String(120), default="Новый запрос")
@@ -105,7 +105,7 @@ class Message(PlatformBase, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
     chat_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tolmach.chats.id", ondelete="CASCADE"),
+        ForeignKey("app.chats.id", ondelete="CASCADE"),
         index=True,
     )
     role: Mapped[str] = mapped_column(String(20))
@@ -120,10 +120,10 @@ class Query(PlatformBase, Base):
     __tablename__ = "queries"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.users.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), index=True)
     chat_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("tolmach.chats.id"),
+        ForeignKey("app.chats.id"),
         nullable=True,
         index=True,
     )
@@ -135,8 +135,11 @@ class Query(PlatformBase, Base):
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
     block_reason: Mapped[str] = mapped_column(Text, default="")
     interpretation_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    resolved_request_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     semantic_terms_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     sql_plan_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    sql_explain_plan_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    sql_explain_cost: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
     confidence_reasons_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
     ambiguity_flags_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
     rows_returned: Mapped[int] = mapped_column(Integer, default=0)
@@ -160,7 +163,7 @@ class QueryClarification(PlatformBase, Base):
     __tablename__ = "query_clarifications"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    query_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.queries.id"), index=True)
+    query_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.queries.id"), index=True)
     question_text: Mapped[str] = mapped_column(Text)
     options_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     chosen_option: Mapped[str] = mapped_column(Text, default="")
@@ -175,7 +178,7 @@ class QueryEvent(PlatformBase, Base):
     __tablename__ = "query_events"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    query_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.queries.id"), index=True)
+    query_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.queries.id"), index=True)
     step_name: Mapped[str] = mapped_column(String(80), index=True)
     status: Mapped[str] = mapped_column(String(40), index=True)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
@@ -190,7 +193,7 @@ class SqlGuardrailLog(PlatformBase, Base):
     __tablename__ = "sql_guardrail_logs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    query_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.queries.id"), index=True)
+    query_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.queries.id"), index=True)
     check_name: Mapped[str] = mapped_column(String(80), index=True)
     status: Mapped[str] = mapped_column(String(40), index=True)
     severity: Mapped[str] = mapped_column(String(20), default="info")
@@ -201,12 +204,51 @@ class SqlGuardrailLog(PlatformBase, Base):
     query: Mapped[Query] = relationship(back_populates="guardrail_logs")
 
 
+class QueryResultCache(PlatformBase, Base):
+    __tablename__ = "query_result_cache"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    sql_text: Mapped[str] = mapped_column(Text)
+    row_limit: Mapped[int] = mapped_column(Integer, default=0)
+    explain_cost: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    explain_plan_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    result_rows_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_accessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class QueryExecutionAudit(PlatformBase, Base):
+    __tablename__ = "query_execution_audit"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    query_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.queries.id"), nullable=True, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    sql_text: Mapped[str] = mapped_column(Text)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(20), default="database", index=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    execution_ms: Mapped[int] = mapped_column(Integer, default=0)
+    explain_cost: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    status: Mapped[str] = mapped_column(String(20), default="ok", index=True)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    explain_plan_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class Report(PlatformBase, Base):
     __tablename__ = "reports"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.users.id"), index=True)
-    query_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.queries.id"), nullable=True, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), index=True)
+    query_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.queries.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255))
     natural_text: Mapped[str] = mapped_column(Text)
     generated_sql: Mapped[str] = mapped_column(Text)
@@ -228,13 +270,13 @@ class ReportVersion(PlatformBase, Base):
     __tablename__ = "report_versions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.reports.id"), index=True)
+    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.reports.id"), index=True)
     version_number: Mapped[int] = mapped_column(Integer)
     generated_sql: Mapped[str] = mapped_column(Text)
     chart_type: Mapped[str] = mapped_column(String(32), default="table_only")
     config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.users.id"), nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
 
     report: Mapped[Report] = relationship(back_populates="versions")
 
@@ -243,7 +285,7 @@ class Schedule(PlatformBase, Base):
     __tablename__ = "schedules"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.reports.id"), index=True)
+    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.reports.id"), index=True)
     frequency: Mapped[str] = mapped_column(String(20), default="weekly", index=True)
     run_at_time: Mapped[Any | None] = mapped_column(Time(), nullable=True)
     day_of_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -262,8 +304,8 @@ class ScheduleRun(PlatformBase, Base):
     __tablename__ = "schedule_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    schedule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.schedules.id"), index=True)
-    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.reports.id"), index=True)
+    schedule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.schedules.id"), index=True)
+    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.reports.id"), index=True)
     status: Mapped[str] = mapped_column(String(20), default="ok", index=True)
     rows_returned: Mapped[int] = mapped_column(Integer, default=0)
     execution_ms: Mapped[int] = mapped_column(Integer, default=0)
@@ -277,7 +319,7 @@ class ReportRecipient(PlatformBase, Base):
     __tablename__ = "report_recipients"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.reports.id"), index=True)
+    report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.reports.id"), index=True)
     email: Mapped[str] = mapped_column(String(255), index=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -288,7 +330,7 @@ class Template(PlatformBase, Base):
     __tablename__ = "templates"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.users.id"), nullable=True, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text, default="")
     natural_text: Mapped[str] = mapped_column(Text)
@@ -301,18 +343,101 @@ class Template(PlatformBase, Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class MetricCatalog(PlatformBase, Base):
+    __tablename__ = "metric_catalog"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    metric_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    business_name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text, default="")
+    sql_expression_template: Mapped[str] = mapped_column(Text)
+    grain: Mapped[str] = mapped_column(String(64), index=True)
+    allowed_dimensions_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    allowed_filters_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    default_chart: Mapped[str] = mapped_column(String(32), default="table_only")
+    safety_tags_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class DimensionCatalog(PlatformBase, Base):
+    __tablename__ = "dimension_catalog"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    dimension_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    business_name: Mapped[str] = mapped_column(String(255))
+    table_name: Mapped[str] = mapped_column(String(128), index=True)
+    column_name: Mapped[str] = mapped_column(Text)
+    join_path: Mapped[str] = mapped_column(Text, default="")
+    data_type: Mapped[str] = mapped_column(String(32))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SemanticTerm(PlatformBase, Base):
+    __tablename__ = "semantic_terms"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    term: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    aliases: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    mapped_entity_type: Mapped[str] = mapped_column(String(32), index=True)
+    mapped_entity_key: Mapped[str] = mapped_column(String(128), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class EmbeddingsCache(Base):
+    __tablename__ = "embeddings_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_type",
+            "entity_key",
+            "embedding_provider",
+            "embedding_model",
+            name="uq_app_embeddings_cache_entity_provider_model",
+        ),
+        {"schema": PLATFORM_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    entity_type: Mapped[str] = mapped_column(String(64), index=True)
+    entity_key: Mapped[str] = mapped_column(String(255), index=True)
+    source_table: Mapped[str] = mapped_column(String(128))
+    source_title: Mapped[str] = mapped_column(String(255), default="")
+    source_text: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    embedding_provider: Mapped[str] = mapped_column(String(64), index=True)
+    embedding_model: Mapped[str] = mapped_column(String(128), index=True)
+    vector_dims: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_json: Mapped[list[float]] = mapped_column(JSONB, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class SemanticLayer(PlatformBase, Base):
     __tablename__ = "semantic_layer"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
     term: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    semantic_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    item_kind: Mapped[str] = mapped_column(String(32), default="legacy", index=True)
     aliases: Mapped[list[str]] = mapped_column(JSONB, default=list)
     sql_expression: Mapped[str] = mapped_column(Text)
     table_name: Mapped[str] = mapped_column(String(64), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     metric_type: Mapped[str] = mapped_column(String(64), default="metric")
     dimension_type: Mapped[str] = mapped_column(String(64), default="")
-    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tolmach.users.id"), nullable=True)
+    semantic_config_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -325,6 +450,31 @@ class SemanticExample(PlatformBase, Base):
     canonical_intent_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     sql_example: Mapped[str] = mapped_column(Text)
     domain_tag: Mapped[str] = mapped_column(String(64), default="general", index=True)
+    metric_key: Mapped[str] = mapped_column(String(128), default="", index=True)
+    dimension_keys_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    filter_keys_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ApprovedTemplate(PlatformBase, Base):
+    __tablename__ = "approved_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    template_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text, default="")
+    natural_text: Mapped[str] = mapped_column(Text)
+    metric_key: Mapped[str] = mapped_column(String(128), index=True)
+    dimension_keys_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    filter_keys_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    canonical_intent_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    chart_type: Mapped[str] = mapped_column(String(32), default="table_only")
+    category: Mapped[str] = mapped_column(String(64), default="general", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

@@ -10,27 +10,27 @@ def score_confidence(interpretation: Interpretation, retrieval: RetrievalResult)
             ambiguities=[],
         )
 
-    score = 25
+    score = max(25, int(round(max(0.0, min(interpretation.provider_confidence, 1.0)) * 55)) + 15)
     reasons: list[str] = []
     ambiguities = list(interpretation.ambiguity_flags)
 
     if interpretation.metric:
-        score += 30
+        score += 18
         reasons.append(f"Метрика распознана: {interpretation.metric}.")
     if interpretation.dimensions:
-        score += 15
+        score += 10
         reasons.append("Разрез распознан: " + ", ".join(interpretation.dimensions) + ".")
     elif interpretation.metric:
         score += 15
         reasons.append("Распознан общий итог без разреза.")
     if interpretation.date_range.get("kind") != "missing" or interpretation.metric == "active_drivers":
-        score += 20
+        score += 15
         reasons.append(f"Период распознан: {interpretation.date_range.get('label', 'не указан')}.")
     if retrieval.semantic_terms:
-        score += min(20, len(retrieval.semantic_terms) * 4)
+        score += min(12, len(retrieval.semantic_terms) * 3)
         reasons.append("Найдены совпадения в semantic layer.")
     if retrieval.examples:
-        score += min(10, len(retrieval.examples) * 3)
+        score += min(8, len(retrieval.examples) * 2)
         reasons.append("Найдены few-shot примеры похожих запросов.")
     if interpretation.top:
         score += 5
@@ -41,8 +41,15 @@ def score_confidence(interpretation: Interpretation, retrieval: RetrievalResult)
         and interpretation.date_range.get("kind") != "missing"
         and not ambiguities
     ):
-        score += 10
+        score += 12
         reasons.append("Метрика, разрез/итог и период согласованы без неоднозначностей.")
+    if interpretation.source == "llm_structured":
+        reasons.append("Основной pipeline использовал structured LLM intent parsing.")
+    if interpretation.fallback_used:
+        score -= 10
+        reasons.append("Использован fallback path: confidence снижена.")
+    if interpretation.reasoning:
+        reasons.append(f"AI reasoning: {interpretation.reasoning}")
 
     score -= min(35, len(ambiguities) * 12)
     score = max(0, min(100, score))

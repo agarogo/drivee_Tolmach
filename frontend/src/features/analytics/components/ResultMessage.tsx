@@ -43,26 +43,41 @@ function MetricsCards({ rows }: { rows: Array<Record<string, any>> }) {
 
 function ExplainBlock({ query }: { query: QueryResult }) {
   const explain = query.interpretation?.explain || {};
+  const resolved = query.resolved_request || {};
+  const filters = resolved.filters || explain.filters || {};
   return (
     <div className="explain-block">
       <div className="card-label">Система поняла запрос так</div>
       <dl>
         <dt>метрика</dt>
-        <dd>{explain.metric || query.interpretation.metric || "не определена"}</dd>
+        <dd>{resolved.metric || explain.metric || query.interpretation.metric || "не определена"}</dd>
         <dt>разрез</dt>
-        <dd>{(explain.dimensions || query.interpretation.dimensions || []).join(", ") || "нет"}</dd>
+        <dd>{(resolved.dimensions || explain.dimensions || query.interpretation.dimensions || []).join(", ") || "нет"}</dd>
         <dt>период</dt>
-        <dd>{explain.period || query.interpretation.date_range?.label || "не указан"}</dd>
+        <dd>{resolved.period?.label || explain.period || query.interpretation.date_range?.label || "не указан"}</dd>
         <dt>фильтры</dt>
-        <dd>{JSON.stringify(explain.filters || {})}</dd>
+        <dd>{JSON.stringify(filters)}</dd>
         <dt>сортировка</dt>
         <dd>{explain.sorting || query.sql_plan?.order_by || "нет"}</dd>
         <dt>ограничение</dt>
-        <dd>{explain.limit || query.sql_plan?.limit || "policy limit"}</dd>
+        <dd>{resolved.limit || explain.limit || query.sql_plan?.limit || "policy limit"}</dd>
+        <dt>pipeline</dt>
+        <dd>{explain.source || query.interpretation.source || "unknown"}</dd>
+        <dt>provider confidence</dt>
+        <dd>{Math.round((explain.provider_confidence || query.interpretation.provider_confidence || 0) * 100)}%</dd>
+        <dt>EXPLAIN cost</dt>
+        <dd>{query.sql_explain_cost || 0}</dd>
       </dl>
       <div className="semantic-chips">
         {(query.semantic_terms || []).slice(0, 8).map((term) => (
           <span key={term.term}>{term.term}</span>
+        ))}
+      </div>
+      <div className="reason-list">
+        {(query.confidence_reasons || []).map((reason) => (
+          <div key={reason} className="reason info">
+            {reason}
+          </div>
         ))}
       </div>
     </div>
@@ -223,7 +238,15 @@ export function ResultMessage({
       <ResultTable rows={query.result_snapshot} />
       <ExplainBlock query={query} />
       <details className="sql-details">
-        <summary>Сгенерированный SQL</summary>
+        <summary>Семантический SQL plan</summary>
+        <pre>{JSON.stringify(query.sql_plan, null, 2)}</pre>
+      </details>
+      <details className="sql-details">
+        <summary>DB EXPLAIN plan</summary>
+        <pre>{JSON.stringify(query.sql_explain_plan, null, 2)}</pre>
+      </details>
+      <details className="sql-details">
+        <summary>Итоговый SQL</summary>
         <code>{query.corrected_sql || query.generated_sql}</code>
       </details>
       <div className="action-strip">

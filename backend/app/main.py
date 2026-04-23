@@ -6,25 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import router
 from app.config import get_settings
-from app.db import AsyncSessionLocal
-from app.services.bootstrap import bootstrap_demo_data
 from app.services.observability import setup_observability
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 setup_observability(settings.otel_exporter_otlp_endpoint)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with AsyncSessionLocal() as db:
-        try:
-            await bootstrap_demo_data(db)
-            logger.info("demo data is ready")
-        except Exception:
-            logger.exception("demo data bootstrap failed")
-            await db.rollback()
     yield
 
 

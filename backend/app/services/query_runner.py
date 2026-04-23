@@ -1,19 +1,44 @@
-from sqlalchemy import text
+from __future__ import annotations
 
-from app.config import get_settings
-from app.db import async_engine
-from app.services.charts import serialize_rows
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.query_execution.service import QueryExecutionResult, execute_safe_query
 from app.services.guardrails import GuardrailError, ValidatedSQL
 
-settings = get_settings()
+
+async def execute_validated_query(
+    validated_sql: ValidatedSQL,
+    *,
+    role: str,
+    db: AsyncSession | None = None,
+    query_id=None,
+    use_cache: bool = True,
+) -> QueryExecutionResult:
+    return await execute_safe_query(
+        validated_sql,
+        role=role,
+        db=db,
+        query_id=query_id,
+        use_cache=use_cache,
+    )
 
 
-async def execute_validated_select(validated_sql: ValidatedSQL) -> list[dict]:
-    async with async_engine.begin() as conn:
-        await conn.execute(text(f"SET LOCAL statement_timeout = {settings.query_timeout_ms};"))
-        result = await conn.execute(text(validated_sql.sql))
-        rows = [dict(row._mapping) for row in result.fetchall()]
-    return serialize_rows(rows)
+async def execute_validated_select(
+    validated_sql: ValidatedSQL,
+    *,
+    role: str = "user",
+    db: AsyncSession | None = None,
+    query_id=None,
+    use_cache: bool = True,
+) -> list[dict]:
+    result = await execute_validated_query(
+        validated_sql,
+        role=role,
+        db=db,
+        query_id=query_id,
+        use_cache=use_cache,
+    )
+    return result.rows
 
 
 async def run_sql(sql: str) -> list[dict]:
