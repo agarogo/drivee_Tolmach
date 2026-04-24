@@ -913,7 +913,11 @@ def _is_local_database(database_url: str) -> bool:
 async def bootstrap_demo_data(db: AsyncSession, allow_nonlocal: bool = False) -> None:
     if settings.is_production:
         raise RuntimeError("Demo bootstrap is disabled when APP_ENV=production.")
-    if not allow_nonlocal and not settings.demo_bootstrap_allow_nonlocal and not _is_local_database(settings.database_url):
+    if (
+        not allow_nonlocal
+        and not settings.demo_bootstrap_allow_nonlocal
+        and not _is_local_database(settings.platform_database_url)
+    ):
         raise RuntimeError(
             "Demo bootstrap is blocked for non-local databases. "
             "Use a local PostgreSQL DSN or pass allow_nonlocal explicitly."

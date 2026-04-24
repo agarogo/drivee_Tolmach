@@ -7,12 +7,13 @@ export function LoadingConfidence({ question }: { question: string }) {
       <div className="loading-head">
         <span className="loader-ring" />
         <div>
-          <strong>Запрос отправлен на backend pipeline</strong>
+          <strong>Request is running through the backend pipeline</strong>
           <span>{question}</span>
         </div>
       </div>
       <p className="analytics-note">
-        Backend пока не стримит пошаговый прогресс, поэтому ниже показан ожидаемый pipeline. Фактические статусы появятся после ответа вместе с `query.events`.
+        The backend does not stream stage-by-stage progress yet, so the timeline below shows the expected pipeline.
+        Real stage statuses arrive in the final response together with `query.events`.
       </p>
       <PipelineTimeline stages={buildPipelineStages(null, true)} running />
     </div>

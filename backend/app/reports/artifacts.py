@@ -56,10 +56,21 @@ def _checksum(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _column_order(rows: list[dict[str, Any]]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                ordered.append(key)
+    return ordered
+
+
 def _build_metadata(rows: list[dict[str, Any]], chart_type: str, semantic_snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         "row_count": len(rows),
-        "columns": list(rows[0].keys()) if rows else [],
+        "columns": _column_order(rows),
         "chart_type": chart_type,
         "semantic_metric": str(semantic_snapshot.get("metric") or semantic_snapshot.get("resolved_request", {}).get("metric") or ""),
     }
@@ -77,7 +88,7 @@ def build_csv_artifact(
     try:
         directory = _run_directory(report_id, run_id)
         path = directory / "result.csv"
-        columns = list(rows[0].keys()) if rows else []
+        columns = _column_order(rows)
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=columns)
             writer.writeheader()
@@ -141,7 +152,7 @@ def build_html_artifact(
     try:
         directory = _run_directory(report_id, run_id)
         path = directory / "summary.html"
-        columns = list(rows[0].keys()) if rows else []
+        columns = _column_order(rows)
         header_html = "".join(f"<th>{html.escape(column)}</th>" for column in columns)
         rows_html = "".join(
             "<tr>" + "".join(f"<td>{html.escape(str(row.get(column, '')))}</td>" for column in columns) + "</tr>"

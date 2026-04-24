@@ -26,11 +26,11 @@ export function QueryComposer({
             onRun();
           }
         }}
-        placeholder="Спросите Толмач: например, покажи выручку по топ-10 городам за последние 30 дней"
+        placeholder="Ask Tolmach, for example: show revenue by top 10 cities for the last 30 days"
         rows={1}
       />
-      <button className="send-btn" disabled={!value.trim() || running} aria-label="Отправить запрос">
-        {running ? "..." : "↑"}
+      <button className="send-btn" disabled={!value.trim() || running} aria-label="Send question">
+        {running ? "..." : "Send"}
       </button>
     </form>
   );

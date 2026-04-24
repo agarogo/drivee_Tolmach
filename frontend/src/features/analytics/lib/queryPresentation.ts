@@ -1,11 +1,11 @@
 import type {
+  AnswerEnvelope,
   BlockReason,
   JsonObject,
-  QueryChartSeries,
-  QueryChartSpec,
   QueryEvent,
   QueryResult,
   QueryResultRow,
+  TableColumn,
 } from "../../../shared/types";
 
 export type PipelineStageId =
@@ -34,13 +34,6 @@ export type PipelineStageView = {
   durationMs: number | null;
 };
 
-export type SemanticVisualizationModel = {
-  chartType: string;
-  xKey: string | null;
-  series: QueryChartSeries[];
-  reason: string;
-};
-
 const BASE_PIPELINE: Array<{
   id: PipelineStageId;
   label: string;
@@ -57,7 +50,7 @@ const BASE_PIPELINE: Array<{
     id: "semantic_match",
     label: "Semantic Match",
     description: "The request is matched against governed terms, examples, and semantic catalog.",
-    stepNames: ["Semantic layer"],
+    stepNames: ["Semantic layer", "Chat continuity"],
   },
   {
     id: "confidence",
@@ -86,8 +79,8 @@ const BASE_PIPELINE: Array<{
   {
     id: "visualization",
     label: "Visualization",
-    description: "Result rows are summarized and rendered as chart/table using the semantic plan.",
-    stepNames: ["Chart selection", "AI answer summary"],
+    description: "Backend selects answer_type and compatible view modes before the UI renders the result.",
+    stepNames: ["Answer contract selection", "AI answer summary"],
   },
 ];
 
@@ -100,13 +93,40 @@ function asArray<T = JsonObject>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
+function answerEnvelope(query: QueryResult): AnswerEnvelope | null {
+  return query.answer || null;
+}
+
+function payloadRows(query: QueryResult): QueryResultRow[] {
+  const payload = answerEnvelope(query)?.render_payload;
+  if (!payload) return query.result_snapshot || [];
+  if ("rows" in payload && Array.isArray(payload.rows)) return payload.rows;
+  if ("supporting_rows" in payload && Array.isArray(payload.supporting_rows)) return payload.supporting_rows;
+  if (payload.kind === "full_report") {
+    const tableSection = payload.sections.find((section) => section.kind === "table");
+    if (tableSection?.rows?.length) return tableSection.rows;
+    const chartSection = payload.sections.find((section) => section.kind === "chart");
+    if (chartSection?.rows?.length) return chartSection.rows;
+  }
+  return query.result_snapshot || [];
+}
+
+function payloadColumns(query: QueryResult): TableColumn[] {
+  const payload = answerEnvelope(query)?.render_payload;
+  if (!payload) return [];
+  if ("columns" in payload && Array.isArray(payload.columns)) return payload.columns;
+  if (payload.kind === "full_report") {
+    const tableSection = payload.sections.find((section) => section.kind === "table");
+    if (tableSection?.columns?.length) return tableSection.columns;
+    const chartSection = payload.sections.find((section) => section.kind === "chart");
+    if (chartSection?.columns?.length) return chartSection.columns;
+  }
+  return [];
+}
+
 export function getCompiledPlan(query: QueryResult): JsonObject {
   const sqlPlan = asObject(query.sql_plan);
-  return (
-    asObject(sqlPlan.server_compiled_plan) ||
-    asObject(sqlPlan.planner_result) ||
-    sqlPlan
-  );
+  return asObject(sqlPlan.server_compiled_plan) || asObject(sqlPlan.planner_result) || sqlPlan;
 }
 
 export function getPlannerResult(query: QueryResult): JsonObject {
@@ -130,9 +150,7 @@ export function getBlockReasons(query: QueryResult): BlockReason[] {
   const sqlPlan = asObject(query.sql_plan);
   const blockReasons = asArray<BlockReason>(sqlPlan.block_reasons);
   if (blockReasons.length) return blockReasons;
-  return query.block_reason
-    ? [{ code: "blocked", message: query.block_reason, details: {} }]
-    : [];
+  return query.block_reason ? [{ code: "blocked", message: query.block_reason, details: {} }] : [];
 }
 
 function findStageEvents(query: QueryResult, stageId: PipelineStageId): QueryEvent[] {
@@ -168,19 +186,20 @@ function stageStatusFromEvents(query: QueryResult, stageId: PipelineStageId): Pi
 }
 
 function stageDetail(query: QueryResult, stageId: PipelineStageId): string {
+  const answer = answerEnvelope(query);
+  const explainability = answer?.explainability;
   if (stageId === "parsing") {
-    return String(asObject(query.interpretation).source || "Structured intent recorded after the run finishes.");
+    return String(asObject(query.interpretation).source || explainability?.source || "Structured intent recorded after the run finishes.");
   }
   if (stageId === "semantic_match") {
-    const semanticTerms = query.semantic_terms.slice(0, 4).map((item) => String(item.term || ""));
+    const semanticTerms = (explainability?.semantic_terms || []).slice(0, 4);
     return semanticTerms.length ? `Matched terms: ${semanticTerms.join(", ")}` : "No semantic terms recorded.";
   }
   if (stageId === "confidence") {
     return `${Math.round(query.confidence_score)}% confidence (${query.confidence_band})`;
   }
   if (stageId === "planning") {
-    const plan = getCompiledPlan(query);
-    const metric = String(plan.metric_label || plan.metric || asObject(query.resolved_request).metric || "not selected");
+    const metric = explainability?.metric || String(getCompiledPlan(query).metric_label || getCompiledPlan(query).metric || "not selected");
     return `Metric: ${metric}`;
   }
   if (stageId === "guardrails") {
@@ -188,7 +207,11 @@ function stageDetail(query: QueryResult, stageId: PipelineStageId): string {
       const firstReason = getBlockReasons(query)[0];
       return firstReason?.message || query.block_reason || "Blocked by safety checks.";
     }
-    return query.sql_explain_cost ? `EXPLAIN cost: ${query.sql_explain_cost}` : "Guardrails log available after validation.";
+    return answer?.sql_visibility.explain_cost
+      ? `EXPLAIN cost: ${answer.sql_visibility.explain_cost}`
+      : query.sql_explain_cost
+        ? `EXPLAIN cost: ${query.sql_explain_cost}`
+        : "Guardrails log available after validation.";
   }
   if (stageId === "execution") {
     if (query.status === "success") return `${query.rows_returned} rows in ${query.execution_ms} ms`;
@@ -196,10 +219,8 @@ function stageDetail(query: QueryResult, stageId: PipelineStageId): string {
     return "Execution did not start.";
   }
   if (stageId === "visualization") {
-    const model = deriveSemanticVisualization(query);
-    return model.chartType === "table_only"
-      ? "Table view only."
-      : `${model.chartType} chart selected from the semantic plan.`;
+    if (!answer) return "Legacy visualization fallback is active.";
+    return `${answer.answer_type_label} via ${answer.primary_view_mode} view.`;
   }
   return "";
 }
@@ -217,9 +238,7 @@ export function buildPipelineStages(query: QueryResult | null, running: boolean)
       label: stage.label,
       description: stage.description,
       status: running ? (index === 0 ? "active" : "planned") : "planned",
-      detail: running
-        ? "Backend will return real stage events when the query finishes."
-        : stage.description,
+      detail: running ? "Backend will return real stage events when the query finishes." : stage.description,
       durationMs: null,
     }));
   }
@@ -235,112 +254,67 @@ export function buildPipelineStages(query: QueryResult | null, running: boolean)
 }
 
 export function getUnderstandingEntries(query: QueryResult): Array<{ label: string; value: string }> {
+  const answer = answerEnvelope(query);
+  const explainability = answer?.explainability;
   const resolved = asObject(query.resolved_request);
   const interpretation = asObject(query.interpretation);
-  const filters = asObject(resolved.filters || interpretation.filters);
-  const dimensions = asArray<string>(resolved.dimensions || interpretation.dimensions);
-  const period = asObject(resolved.period || interpretation.date_range);
+  const filters = explainability?.filters || asObject(resolved.filters || interpretation.filters);
+  const dimensions = explainability?.dimensions || asArray<string>(resolved.dimensions || interpretation.dimensions);
+  const period = explainability?.period || String(asObject(resolved.period || interpretation.date_range).label || "Not specified");
 
   return [
-    {
-      label: "Question",
-      value: query.natural_text,
-    },
-    {
-      label: "Metric",
-      value: String(resolved.metric || interpretation.metric || "Not resolved"),
-    },
-    {
-      label: "Breakdown",
-      value: dimensions.length ? dimensions.join(", ") : "No breakdown",
-    },
-    {
-      label: "Period",
-      value: String(period.label || period.kind || "Not specified"),
-    },
-    {
-      label: "Filters",
-      value: Object.keys(filters).length ? JSON.stringify(filters) : "No explicit filters",
-    },
-    {
-      label: "Intent source",
-      value: String(interpretation.source || "unknown"),
-    },
+    { label: "Question", value: query.natural_text },
+    { label: "Metric", value: explainability?.metric || String(resolved.metric || interpretation.metric || "Not resolved") },
+    { label: "Breakdown", value: dimensions.length ? dimensions.join(", ") : "No breakdown" },
+    { label: "Period", value: period },
+    { label: "Filters", value: Object.keys(filters).length ? JSON.stringify(filters) : "No explicit filters" },
+    { label: "Intent source", value: explainability?.source || String(interpretation.source || "unknown") },
   ];
 }
 
 export function getSelectionEntries(query: QueryResult): Array<{ label: string; value: string }> {
+  const answer = answerEnvelope(query);
+  const explainability = answer?.explainability;
   const plan = getCompiledPlan(query);
   const planner = getPlannerResult(query);
-  const dimensions = asArray<string>(plan.dimensions);
-  const dimensionLabels = asObject(plan.dimension_labels);
-  const filters = asArray<string>(plan.filters);
+  const dimensions = explainability?.dimensions || asArray<string>(plan.dimensions);
+  const dimensionLabels = explainability?.dimension_labels || asObject(plan.dimension_labels);
   const sourceTables = asArray<string>(asObject(query.sql_plan).source_tables);
 
   return [
-    {
-      label: "Metric",
-      value: String(plan.metric_label || plan.metric || "Not selected"),
-    },
-    {
-      label: "Grain",
-      value: String(planner.grain || "unknown"),
-    },
+    { label: "Answer type", value: answer?.answer_type_label || query.answer_type_key || "unknown" },
+    { label: "Primary view", value: answer?.primary_view_mode || query.primary_view_mode || "table" },
+    { label: "Metric", value: explainability?.metric || String(plan.metric_label || plan.metric || "Not selected") },
+    { label: "Grain", value: answer?.result_grain || String(planner.grain || "unknown") },
     {
       label: "Dimensions",
-      value: dimensions.length
-        ? dimensions.map((key) => String(dimensionLabels[key] || key)).join(", ")
-        : "No dimensions",
+      value: dimensions.length ? dimensions.map((key) => String(dimensionLabels[key] || key)).join(", ") : "No dimensions",
     },
-    {
-      label: "Filters",
-      value: filters.length ? filters.join("; ") : "No compiled filters",
-    },
-    {
-      label: "Source tables",
-      value: sourceTables.length ? sourceTables.join(", ") : String(plan.source_table || "unknown"),
-    },
-    {
-      label: "Semantic chart",
-      value: String(plan.chart_type || query.chart_type || "table_only"),
-    },
+    { label: "Source tables", value: sourceTables.length ? sourceTables.join(", ") : String(plan.source_table || "unknown") },
   ];
 }
 
-export function deriveSemanticVisualization(query: QueryResult): SemanticVisualizationModel {
-  const plan = getCompiledPlan(query);
-  const chartType = String(plan.chart_type || query.chart_type || "table_only");
-  const dimensions = asArray<string>(plan.dimensions);
-  const metricKey = String(plan.metric || asObject(query.resolved_request).metric || "");
-  const metricLabel = String(plan.metric_label || metricKey || "value");
-  const chartSpec = (query.chart_spec || {}) as QueryChartSpec;
-  const semanticXKey = dimensions[0] || null;
-  const xKey = semanticXKey || chartSpec.x || null;
-  const series = metricKey
-    ? [{ key: metricKey, name: metricLabel }]
-    : Array.isArray(chartSpec.series)
-      ? chartSpec.series
-      : [];
-
-  return {
-    chartType,
-    xKey,
-    series,
-    reason: chartType === "table_only"
-      ? "Semantic plan says that a table is safer than a chart for this result."
-      : "Visualization uses chart type selected by the semantic plan.",
-  };
-}
-
 export function getVisibleSql(query: QueryResult): string {
-  return query.corrected_sql || query.generated_sql || "";
-}
-
-export function getSummaryText(query: QueryResult): string {
-  if (query.status !== "success") return "";
-  return query.ai_answer || "";
+  return query.answer?.sql_visibility.sql || query.corrected_sql || query.generated_sql || "";
 }
 
 export function getSnapshotRows(query: QueryResult): QueryResultRow[] {
-  return query.result_snapshot || [];
+  return payloadRows(query);
+}
+
+export function getSnapshotColumns(query: QueryResult): TableColumn[] {
+  const columns = payloadColumns(query);
+  if (columns.length) return columns;
+  const rows = payloadRows(query);
+  const orderedKeys: string[] = [];
+  const seen = new Set<string>();
+  rows.forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (!seen.has(key)) {
+        seen.add(key);
+        orderedKeys.push(key);
+      }
+    });
+  });
+  return orderedKeys.map((key) => ({ key, label: key.replace(/_/g, " "), data_type: "unknown" }));
 }

@@ -10,7 +10,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db import async_engine
+from app.db import analytics_engine, platform_engine
 from app.models import QueryExecutionAudit, QueryResultCache
 from app.query_execution.fingerprint import build_query_fingerprint
 from app.services.charts import serialize_rows
@@ -187,7 +187,7 @@ async def _record_execution_audit(
 
 async def _execute_database_query(validated_sql: ValidatedSQL) -> tuple[list[dict[str, Any]], int]:
     started = _utcnow()
-    async with async_engine.connect() as conn:
+    async with analytics_engine.connect() as conn:
         async with conn.begin():
             await conn.execute(text("SET TRANSACTION READ ONLY"))
             await conn.execute(text(f"SET LOCAL statement_timeout = {settings.query_timeout_ms}"))

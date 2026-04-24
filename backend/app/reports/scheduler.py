@@ -18,6 +18,12 @@ from app.reports.artifacts import BuiltArtifact, build_report_artifacts
 from app.reports.delivery import DeliveryPayload, get_delivery_adapter
 from app.reports.errors import ReportRuntimeError, ReportValidationError
 from app.reports.service import create_run_record, utcnow
+from app.reports.worker_runtime import (
+    get_worker_heartbeat,
+    heartbeat_is_fresh,
+    record_worker_heartbeat,
+    scheduler_worker_name,
+)
 from app.services.guardrails import validate_sql
 from app.services.query_runner import execute_validated_query
 
@@ -58,11 +64,14 @@ def parse_run_time(value: Any) -> time:
 def report_summary_from_rows(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "Query returned no rows."
-    if len(rows) == 1:
-        first = ", ".join(f"{key}={value}" for key, value in rows[0].items())
-        return f"Query returned 1 row: {first}"
-    first = ", ".join(f"{key}={value}" for key, value in rows[0].items())
-    return f"Query returned {len(rows)} rows. First row: {first}"
+    columns: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                columns.append(key)
+    return f"Query returned {len(rows)} rows across {len(columns)} columns."
 
 
 def _structured_error(exc: Exception) -> tuple[dict[str, Any], str, bool]:
@@ -429,22 +438,54 @@ async def run_scheduler_cycle() -> dict[str, Any]:
     }
 
 
+async def _best_effort_worker_heartbeat(*, status: str, metadata: dict[str, Any] | None = None) -> None:
+    try:
+        async with AsyncSessionLocal() as db:
+            await record_worker_heartbeat(
+                db,
+                worker_name=scheduler_worker_name(),
+                status=status,
+                metadata=metadata,
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("failed to update scheduler worker heartbeat")
+
+
 async def scheduler_loop() -> None:
     logger.info("scheduler worker started")
+    await _best_effort_worker_heartbeat(status="starting", metadata={"phase": "boot"})
     while settings.scheduler_enabled:
         try:
+            await _best_effort_worker_heartbeat(status="running", metadata={"phase": "poll"})
             cycle = await run_scheduler_cycle()
             logger.info("scheduler cycle completed: %s", cycle)
+            await _best_effort_worker_heartbeat(
+                status="sleeping",
+                metadata={**cycle, "next_poll_seconds": max(1, settings.scheduler_poll_interval_seconds)},
+            )
         except Exception:
             logger.exception("scheduler cycle failed")
+            await _best_effort_worker_heartbeat(
+                status="error",
+                metadata={"next_poll_seconds": max(1, settings.scheduler_poll_interval_seconds)},
+            )
         await asyncio.sleep(max(1, settings.scheduler_poll_interval_seconds))
 
 
 async def get_scheduler_summary(db: AsyncSession) -> dict[str, Any]:
     now = utcnow()
     succeeded_after = now - timedelta(hours=24)
+    heartbeat = await get_worker_heartbeat(db, scheduler_worker_name())
     return {
         "worker_enabled": settings.scheduler_enabled,
+        "worker_name": scheduler_worker_name(),
+        "worker_alive": heartbeat_is_fresh(heartbeat.last_seen_at if heartbeat else None),
+        "worker_status": heartbeat.status if heartbeat else "missing",
+        "worker_last_seen_at": heartbeat.last_seen_at if heartbeat else None,
+        "worker_hostname": heartbeat.hostname if heartbeat else "",
+        "worker_process_id": heartbeat.process_id if heartbeat else 0,
+        "worker_metadata": dict(heartbeat.metadata_json or {}) if heartbeat else {},
         "queued_runs": int(await db.scalar(select(func.count(ScheduleRun.id)).where(ScheduleRun.status == "queued")) or 0),
         "running_runs": int(await db.scalar(select(func.count(ScheduleRun.id)).where(ScheduleRun.status == "running")) or 0),
         "failed_runs": int(await db.scalar(select(func.count(ScheduleRun.id)).where(ScheduleRun.status == "failed")) or 0),

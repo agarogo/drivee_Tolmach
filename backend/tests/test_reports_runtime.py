@@ -76,9 +76,8 @@ class ReportsRuntimeTests(TestCase):
         many_rows = report_summary_from_rows([{"city": "Moscow", "revenue": 1200}, {"city": "Kazan", "revenue": 900}])
 
         self.assertEqual(no_rows, "Query returned no rows.")
-        self.assertIn("1 row", one_row)
-        self.assertIn("2 rows", many_rows)
-        self.assertIn("First row", many_rows)
+        self.assertEqual(one_row, "Query returned 1 rows across 2 columns.")
+        self.assertEqual(many_rows, "Query returned 2 rows across 2 columns.")
 
     def test_next_run_at_daily_produces_future_timestamp(self) -> None:
         candidate = next_run_at("daily", None, None, None)

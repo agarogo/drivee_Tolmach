@@ -1,46 +1,79 @@
-import type { Report } from "../../shared/types";
+import type { Report, TableColumn } from "../../shared/types";
 import { formatDate } from "../../shared/utils/format";
-import { ResultChart } from "../analytics/components/ResultChart";
+import { exportRowsToCsv } from "../analytics/lib/exports";
 import { ResultTable } from "../analytics/components/ResultTable";
 
-function ReportsList({ reports, selectedId, onSelect }: { reports: Report[]; selectedId?: string; onSelect: (id: string) => void }) {
+function reportColumns(report: Report | null): TableColumn[] {
+  const orderedKeys: string[] = [];
+  const seen = new Set<string>();
+  (report?.result_snapshot || []).forEach((row) => {
+    Object.keys(row).forEach((key) => {
+      if (!seen.has(key)) {
+        seen.add(key);
+        orderedKeys.push(key);
+      }
+    });
+  });
+  return orderedKeys.map((key) => ({ key, label: key.replace(/_/g, " "), data_type: "unknown" }));
+}
+
+function ReportsList({
+  reports,
+  selectedId,
+  onSelect,
+}: {
+  reports: Report[];
+  selectedId?: string;
+  onSelect: (id: string) => void;
+}) {
   return (
     <div className="list-panel">
       {reports.map((report) => (
-        <button key={report.id} className={selectedId === report.id ? "list-item active" : "list-item"} onClick={() => onSelect(report.id)}>
+        <button
+          key={report.id}
+          className={selectedId === report.id ? "list-item active" : "list-item"}
+          onClick={() => onSelect(report.id)}
+        >
           <strong>{report.title}</strong>
           <span>{formatDate(report.updated_at)}</span>
         </button>
       ))}
-      {!reports.length && <div className="empty-card">Сохранённых отчётов пока нет.</div>}
+      {!reports.length && <div className="empty-card">Сохраненных отчетов пока нет.</div>}
     </div>
   );
 }
 
 function ReportEditor({ report, onRun }: { report: Report | null; onRun: (id: string) => void }) {
-  if (!report) return <div className="empty-card page-empty">Выберите отчёт.</div>;
+  if (!report) return <div className="empty-card page-empty">Выберите отчет.</div>;
+  const columns = reportColumns(report);
   return (
     <div className="report-editor">
-      <div className="breadcrumbs">Отчёты / {report.title}</div>
+      <div className="breadcrumbs">Отчеты / {report.title}</div>
       <div className="report-head">
         <div>
           <h1>{report.title}</h1>
-          <span className={report.is_active ? "status-pill ok" : "status-pill muted"}>{report.is_active ? "active" : "paused"}</span>
+          <span className={report.is_active ? "status-pill ok" : "status-pill muted"}>
+            {report.is_active ? "active" : "paused"}
+          </span>
         </div>
         <div className="actions-row">
           <button className="run-btn small" onClick={() => onRun(report.id)}>
             Запустить сейчас
           </button>
-          <button className="ghost-btn">Поделиться</button>
-          <button className="ghost-btn">Скачать CSV</button>
+          <button
+            className="ghost-btn"
+            disabled={!report.result_snapshot.length}
+            onClick={() => exportRowsToCsv(report.result_snapshot, `report-${report.id.slice(0, 8)}.csv`, columns.map((column) => column.key))}
+          >
+            Скачать CSV
+          </button>
         </div>
       </div>
       <details className="sql-details open-like" open>
         <summary>SQL</summary>
         <code>{report.generated_sql}</code>
       </details>
-      <ResultChart rows={report.result_snapshot} chartSpec={report.chart_spec} />
-      <ResultTable rows={report.result_snapshot} />
+      <ResultTable rows={report.result_snapshot} columns={columns} />
       <div className="report-side">
         <div className="panel">
           <h3>Параметры</h3>

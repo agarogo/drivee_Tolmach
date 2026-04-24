@@ -8,8 +8,8 @@ import { ReportsPage } from "../features/reports/ReportsPage";
 import { SchedulesPage } from "../features/schedules/SchedulesPage";
 import { TemplatesPage } from "../features/templates/TemplatesPage";
 import { fetchMe } from "../shared/api/auth";
+import { fetchChats } from "../shared/api/chats";
 import { clearToken, getStoredToken, storeToken } from "../shared/api/client";
-import { fetchHistory } from "../shared/api/queries";
 import { fetchReport, fetchReports, runReport } from "../shared/api/reports";
 import { fetchSchedules, toggleSchedule } from "../shared/api/schedules";
 import { fetchTemplates } from "../shared/api/templates";
@@ -32,6 +32,13 @@ export default function App() {
     onToast: setToast,
     onReportSaved: setSelectedReportId,
   });
+  const {
+    currentChatId,
+    openChat,
+    createChat: createChatSession,
+    deleteChat: deleteChatSession,
+    hydrateSelection,
+  } = analytics;
 
   const authenticated = authStatus === "authenticated" && Boolean(user);
 
@@ -54,7 +61,7 @@ export default function App() {
   }, []);
 
   const templatesQuery = useQuery({ queryKey: ["templates"], queryFn: fetchTemplates, enabled: authenticated });
-  const historyQuery = useQuery({ queryKey: ["history"], queryFn: fetchHistory, enabled: authenticated });
+  const chatsQuery = useQuery({ queryKey: ["chats"], queryFn: fetchChats, enabled: authenticated });
   const reportsQuery = useQuery({ queryKey: ["reports"], queryFn: fetchReports, enabled: authenticated });
   const selectedReportQuery = useQuery({
     queryKey: ["report", selectedReportId],
@@ -64,9 +71,15 @@ export default function App() {
   const schedulesQuery = useQuery({ queryKey: ["schedules"], queryFn: fetchSchedules, enabled: authenticated });
 
   const templates = templatesQuery.data || [];
-  const history = historyQuery.data || [];
+  const chats = chatsQuery.data || [];
   const reports = reportsQuery.data || [];
   const schedules = schedulesQuery.data || [];
+
+  useEffect(() => {
+    if (!authenticated) return;
+    if (chatsQuery.isLoading || chatsQuery.isError) return;
+    void hydrateSelection(chats);
+  }, [authenticated, chats, chatsQuery.isError, chatsQuery.isLoading, hydrateSelection]);
 
   useEffect(() => {
     if (!selectedReportId && reports[0]?.id) setSelectedReportId(reports[0].id);
@@ -76,7 +89,8 @@ export default function App() {
     if (!selectedScheduleId && schedules[0]?.id) setSelectedScheduleId(schedules[0].id);
   }, [schedules, selectedScheduleId]);
 
-  const currentReport = selectedReportQuery.data || reports.find((report) => report.id === selectedReportId) || reports[0] || null;
+  const currentReport =
+    selectedReportQuery.data || reports.find((report) => report.id === selectedReportId) || reports[0] || null;
   const currentScheduleId = selectedScheduleId || schedules[0]?.id;
 
   function onAuth(auth: AuthResponse) {
@@ -99,14 +113,14 @@ export default function App() {
   async function handleRunReport(id: string) {
     const report = await runReport(id);
     setToast("Report refreshed");
-    queryClient.invalidateQueries({ queryKey: ["reports"] });
-    queryClient.invalidateQueries({ queryKey: ["report", report.id] });
-    queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    await queryClient.invalidateQueries({ queryKey: ["reports"] });
+    await queryClient.invalidateQueries({ queryKey: ["report", report.id] });
+    await queryClient.invalidateQueries({ queryKey: ["schedules"] });
   }
 
   async function handleToggleSchedule(id: string) {
     await toggleSchedule(id);
-    queryClient.invalidateQueries({ queryKey: ["schedules"] });
+    await queryClient.invalidateQueries({ queryKey: ["schedules"] });
   }
 
   let page;
@@ -147,13 +161,20 @@ export default function App() {
         running={analytics.running}
         pendingQuestion={analytics.pendingQuestion}
         currentQuery={analytics.currentQuery}
+        currentChatId={currentChatId}
+        messages={analytics.messages}
         templates={templates}
         saving={analytics.saving}
+        loadingChat={analytics.loadingChat}
+        chatError={analytics.chatError}
+        restoringChatSelection={authenticated && chatsQuery.isLoading && !analytics.selectionHydrated}
         onDraftChange={analytics.setDraft}
         onRun={analytics.submitQuery}
         onSave={(title, schedule, recipients) => analytics.saveReport({ title, schedule, recipients })}
         onClarify={analytics.clarify}
         onReuseQuestion={analytics.reuseQuestion}
+        onCreateChat={() => createChatSession()}
+        onRetryCurrentChat={() => analytics.reloadCurrentChat()}
       />
     );
   }
@@ -173,16 +194,26 @@ export default function App() {
       <TopNav view={view} user={user} onView={setView} onLogout={logout} />
       <div className="app-body">
         <Sidebar
-          history={history}
+          chats={chats}
+          selectedChatId={currentChatId}
           templates={templates}
+          loadingChats={chatsQuery.isLoading}
+          chatsError={chatsQuery.isError ? "Could not load chats." : ""}
+          creatingChat={analytics.creatingChat}
+          deletingChatId={analytics.deletingChatId}
+          busyChatId={analytics.busyChatId}
+          onRetryChats={() => {
+            void chatsQuery.refetch();
+          }}
           onNew={() => {
-            analytics.resetAnalytics();
+            createChatSession();
             setView("analytics");
           }}
-          onPickQuery={(query) => {
-            analytics.selectQuery(query);
+          onPickChat={(chatId) => {
+            void openChat(chatId);
             setView("analytics");
           }}
+          onDeleteChat={(chatId) => deleteChatSession(chatId)}
           onUseTemplate={(text) => {
             analytics.reuseQuestion(text);
             setView("analytics");

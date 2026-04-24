@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.answer_contracts import AnswerEnvelope
+
 
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -67,6 +69,12 @@ class AssistantMessageResponse(BaseModel):
     chat: ChatOut
     user_message: MessageOut
     assistant_message: MessageOut
+
+
+class ChatDeleteOut(BaseModel):
+    id: UUID
+    deleted: bool = True
+    deleted_related_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class TemplateOut(BaseModel):
@@ -155,6 +163,10 @@ class QueryOut(BaseModel):
     ambiguity_flags: list[str]
     rows_returned: int
     execution_ms: int
+    answer_type_code: int = 5
+    answer_type_key: str = "table"
+    primary_view_mode: str = "table"
+    answer: AnswerEnvelope | None = None
     chart_type: str
     chart_spec: dict[str, Any]
     result_snapshot: list[dict[str, Any]]

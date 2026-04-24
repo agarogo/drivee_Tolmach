@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.config import get_settings
-from app.db import async_engine
+from app.db import analytics_engine
 
 settings = get_settings()
 
@@ -18,7 +18,7 @@ class ExplainCostCheckResult:
 
 
 async def run_explain_cost_check(sql: str) -> ExplainCostCheckResult:
-    async with async_engine.connect() as conn:
+    async with analytics_engine.connect() as conn:
         async with conn.begin():
             await conn.execute(text("SET TRANSACTION READ ONLY"))
             await conn.execute(text(f"SET LOCAL statement_timeout = {settings.query_timeout_ms}"))

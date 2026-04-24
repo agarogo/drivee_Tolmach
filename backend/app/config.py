@@ -1,19 +1,57 @@
-from functools import lru_cache
+from __future__ import annotations
 
-from pydantic import field_validator
+import json
+from functools import lru_cache
+from urllib.parse import urlparse
+
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _normalize_postgres_dsn(value: str, field_name: str) -> str:
+    dsn = value.strip()
+    if not dsn:
+        raise ValueError(f"{field_name} must be set")
+
+    lowered = dsn.lower()
+    if lowered.startswith("sqlite"):
+        raise ValueError(f"{field_name} must point to PostgreSQL, SQLite is not supported")
+
+    if lowered.startswith("postgres://"):
+        return f"postgresql+asyncpg://{dsn.split('://', 1)[1]}"
+    if lowered.startswith("postgresql://"):
+        return f"postgresql+asyncpg://{dsn.split('://', 1)[1]}"
+    if lowered.startswith("postgresql+"):
+        return f"postgresql+asyncpg://{dsn.split('://', 1)[1]}"
+
+    raise ValueError(f"{field_name} must use a PostgreSQL DSN")
+
+
+def _database_name_from_dsn(dsn: str) -> str:
+    parsed = urlparse(dsn.replace("+asyncpg", ""))
+    return (parsed.path or "/").lstrip("/") or "unknown"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
-    app_name: str = "Толмач"
+    app_name: str = "Tolmach"
     app_env: str = "development"
-    database_url: str
-    frontend_origin: str = "http://localhost:5173"
+
+    platform_database_url: str = ""
+    analytics_database_url: str = ""
+    database_url: str = ""
+
+    frontend_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     jwt_secret: str = "change-me-in-production"
     jwt_ttl_minutes: int = 60 * 24 * 7
+    session_ttl_hours: int = 24 * 7
+    session_cookie_name: str = "tolmach_session"
+    session_cookie_secure: bool = False
+    session_cookie_samesite: str = "lax"
+    csrf_cookie_name: str = "tolmach_csrf"
+    csrf_header_name: str = "X-CSRF-Token"
 
     llm_provider: str = "ollama"
     llm_model: str = "qwen3:4b"
@@ -63,6 +101,7 @@ class Settings(BaseSettings):
     scheduler_max_concurrent_runs: int = 2
     scheduler_default_max_retries: int = 2
     scheduler_default_retry_backoff_seconds: int = 300
+    worker_heartbeat_ttl_seconds: int = 60
     report_artifact_dir: str = "/tmp/tolmach-report-artifacts"
     report_result_snapshot_limit: int = 200
     report_email_adapter: str = "smtp"
@@ -102,6 +141,26 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.app_env in {"prod", "production"}
 
+    @property
+    def frontend_origin(self) -> str:
+        return self.frontend_origins[0]
+
+    @property
+    def session_cookie_secure_effective(self) -> bool:
+        return self.session_cookie_secure or self.is_production
+
+    @property
+    def scheduler_worker_stale_after_seconds(self) -> int:
+        return max(self.worker_heartbeat_ttl_seconds, self.scheduler_poll_interval_seconds * 3)
+
+    @property
+    def platform_database_label(self) -> str:
+        return _database_name_from_dsn(self.platform_database_url)
+
+    @property
+    def analytics_database_label(self) -> str:
+        return _database_name_from_dsn(self.analytics_database_url)
+
     @field_validator("app_env")
     @classmethod
     def normalize_app_env(cls, value: str) -> str:
@@ -117,6 +176,7 @@ class Settings(BaseSettings):
         "llm_prompt_clarification_version",
         "llm_prompt_plan_version",
         "llm_prompt_summary_version",
+        "session_cookie_samesite",
     )
     @classmethod
     def normalize_string_setting(cls, value: str) -> str:
@@ -125,25 +185,59 @@ class Settings(BaseSettings):
             raise ValueError("Setting must not be empty")
         return normalized
 
-    @field_validator("database_url")
+    @field_validator("frontend_origins", mode="before")
     @classmethod
-    def normalize_database_url(cls, value: str) -> str:
-        database_url = value.strip()
-        if not database_url:
-            raise ValueError("DATABASE_URL must be set")
+    def parse_frontend_origins(cls, value: object) -> list[str]:
+        if value is None or value == "":
+            items = ["http://localhost:5173"]
+        elif isinstance(value, list):
+            items = value
+        elif isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("["):
+                items = json.loads(raw)
+            else:
+                items = [item.strip() for item in raw.split(",")]
+        else:
+            raise ValueError("FRONTEND_ORIGINS must be a list or comma-separated string")
 
-        lowered = database_url.lower()
-        if lowered.startswith("sqlite"):
-            raise ValueError("DATABASE_URL must point to PostgreSQL, SQLite is not supported")
+        normalized: list[str] = []
+        for item in items:
+            origin = str(item).strip().rstrip("/")
+            if not origin:
+                continue
+            if origin == "*":
+                raise ValueError("FRONTEND_ORIGINS must not contain '*'")
+            if not origin.startswith(("http://", "https://")):
+                raise ValueError("Each FRONTEND_ORIGINS entry must be an explicit http/https origin")
+            normalized.append(origin)
 
-        if lowered.startswith("postgres://"):
-            return f"postgresql+asyncpg://{database_url.split('://', 1)[1]}"
-        if lowered.startswith("postgresql://"):
-            return f"postgresql+asyncpg://{database_url.split('://', 1)[1]}"
-        if lowered.startswith("postgresql+"):
-            return f"postgresql+asyncpg://{database_url.split('://', 1)[1]}"
+        if not normalized:
+            raise ValueError("FRONTEND_ORIGINS must contain at least one explicit origin")
+        return normalized
 
-        raise ValueError("DATABASE_URL must use a PostgreSQL DSN")
+    @field_validator("csrf_header_name")
+    @classmethod
+    def normalize_csrf_header_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("CSRF_HEADER_NAME must not be empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_database_urls(self) -> "Settings":
+        legacy_database_url = self.database_url.strip()
+        platform_dsn = self.platform_database_url.strip() or legacy_database_url
+        analytics_dsn = self.analytics_database_url.strip() or platform_dsn
+
+        self.platform_database_url = _normalize_postgres_dsn(platform_dsn, "PLATFORM_DATABASE_URL")
+        self.analytics_database_url = _normalize_postgres_dsn(analytics_dsn, "ANALYTICS_DATABASE_URL")
+        self.database_url = self.platform_database_url
+
+        if self.session_cookie_samesite not in {"lax", "strict", "none"}:
+            raise ValueError("SESSION_COOKIE_SAMESITE must be one of: lax, strict, none")
+
+        return self
 
 
 @lru_cache

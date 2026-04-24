@@ -1,18 +1,26 @@
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
 
 settings = get_settings()
 
-async_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(
-    bind=async_engine,
+platform_engine: AsyncEngine = create_async_engine(settings.platform_database_url, pool_pre_ping=True)
+analytics_engine: AsyncEngine = create_async_engine(settings.analytics_database_url, pool_pre_ping=True)
+
+PlatformSessionLocal = async_sessionmaker(
+    bind=platform_engine,
     autoflush=False,
     expire_on_commit=False,
 )
+
+# Compatibility aliases for the existing service layer and scheduler.
+AsyncSessionLocal = PlatformSessionLocal
+async_engine = analytics_engine
 
 
 class Base(DeclarativeBase):
@@ -20,5 +28,5 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
-    async with AsyncSessionLocal() as db:
+    async with PlatformSessionLocal() as db:
         yield db

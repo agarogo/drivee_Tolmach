@@ -1,40 +1,43 @@
 import { useRef, useState } from "react";
+import type { RefObject } from "react";
 import type { QueryResult } from "../../../shared/types";
 import { formatDate } from "../../../shared/utils/format";
+import { getAnswerEnvelope } from "../lib/answerUi";
 import { buildPipelineStages } from "../lib/queryPresentation";
+import { AnswerRenderer } from "./AnswerRenderer";
 import { BlockedQueryPanel } from "./BlockedQueryPanel";
 import { ClarificationPanel } from "./ClarificationPanel";
 import { PipelineTimeline } from "./PipelineTimeline";
 import { RequestUnderstandingPanel } from "./RequestUnderstandingPanel";
 import { ResultExportActions } from "./ResultExportActions";
 import { SqlDiagnosticsPanel } from "./SqlDiagnosticsPanel";
-import { SummaryPanel } from "./SummaryPanel";
-import { VisualizationPanel } from "./VisualizationPanel";
 
 function SaveReportPanel({
   query,
   onSave,
   saving,
+  anchorRef,
 }: {
   query: QueryResult;
   onSave: (title: string, schedule: Record<string, unknown> | null, recipients: string[]) => void;
   saving: boolean;
+  anchorRef: RefObject<HTMLElement>;
 }) {
   const [title, setTitle] = useState(
     query.interpretation?.metric
-      ? `${String(query.interpretation.metric)} · ${formatDate(query.created_at)}`
-      : "Новый отчет",
+      ? `${String(query.interpretation.metric)} report ${formatDate(query.created_at)}`
+      : "Analytics report",
   );
-  const [enabled, setEnabled] = useState(true);
+  const [enabled, setEnabled] = useState(query.answer?.answer_type_key === "full_report");
   const [frequency, setFrequency] = useState("weekly");
   const [recipients, setRecipients] = useState("ops-team@drivee.example");
 
   return (
-    <section className="analytics-card save-report-card">
-      <div className="analytics-card-head">
+    <section ref={anchorRef} className="answer-card save-report-card">
+      <div className="answer-card-head">
         <div>
-          <span className="eyebrow">Report</span>
-          <h3>Save as report</h3>
+          <span className="eyebrow">Report Save Flow</span>
+          <h3>Save this answer as a first-class report</h3>
         </div>
       </div>
       <div className="save-panel">
@@ -120,12 +123,15 @@ export function ResultMessage({
   onReuseQuestion: (text: string) => void;
 }) {
   const exportRef = useRef<HTMLElement>(null);
+  const savePanelRef = useRef<HTMLElement>(null);
   const stages = buildPipelineStages(query, false);
+  const answer = getAnswerEnvelope(query);
 
   return (
     <div className="assistant-card result-stack analytics-flow-shell">
       <PipelineTimeline stages={stages} running={false} />
-      <RequestUnderstandingPanel query={query} />
+
+      {query.status !== "success" && <RequestUnderstandingPanel query={query} />}
 
       {query.status === "clarification_required" && (
         <ClarificationPanel query={query} onClarify={onClarify} />
@@ -140,15 +146,28 @@ export function ResultMessage({
       )}
 
       {query.status === "success" && (
-        <>
-          <SummaryPanel query={query} />
-          <VisualizationPanel ref={exportRef} query={query} />
-          <ResultExportActions query={query} exportRef={exportRef} />
-          <SaveReportPanel query={query} saving={saving} onSave={onSave} />
-        </>
-      )}
+        <div className="answer-message-layout">
+          <div className="answer-message-main">
+            <AnswerRenderer
+              ref={exportRef}
+              query={query}
+              onReuseQuestion={onReuseQuestion}
+              onRequestSave={() => savePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })}
+            />
 
-      <SqlDiagnosticsPanel query={query} />
+            {answer?.answer_type_key !== "chat_help" && <ResultExportActions query={query} exportRef={exportRef} />}
+
+            {answer?.requires_sql && (
+              <SaveReportPanel query={query} saving={saving} onSave={onSave} anchorRef={savePanelRef} />
+            )}
+          </div>
+
+          <div className="answer-message-side">
+            <RequestUnderstandingPanel query={query} />
+            <SqlDiagnosticsPanel query={query} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

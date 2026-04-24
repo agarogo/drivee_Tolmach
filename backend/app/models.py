@@ -71,11 +71,24 @@ class RefreshToken(PlatformBase, Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app.users.id"), index=True)
-    token_hash: Mapped[str] = mapped_column(String(255))
+    token_hash: Mapped[str] = mapped_column(String(255), index=True)
     device_hint: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkerHeartbeat(PlatformBase, Base):
+    __tablename__ = "worker_heartbeats"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid_pk)
+    worker_name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    worker_type: Mapped[str] = mapped_column(String(40), default="scheduler", index=True)
+    hostname: Mapped[str] = mapped_column(String(255), default="")
+    process_id: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(40), default="starting", index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class Chat(PlatformBase, Base):
@@ -144,6 +157,10 @@ class Query(PlatformBase, Base):
     ambiguity_flags_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
     rows_returned: Mapped[int] = mapped_column(Integer, default=0)
     execution_ms: Mapped[int] = mapped_column(Integer, default=0)
+    answer_type_code: Mapped[int] = mapped_column(Integer, default=5, index=True)
+    answer_type_key: Mapped[str] = mapped_column(String(32), default="table", index=True)
+    primary_view_mode: Mapped[str] = mapped_column(String(32), default="table")
+    answer_envelope_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     chart_type: Mapped[str] = mapped_column(String(32), default="table_only")
     result_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     chart_spec: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)

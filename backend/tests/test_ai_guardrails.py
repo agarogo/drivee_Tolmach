@@ -64,7 +64,7 @@ class AiGuardrailsTests(unittest.TestCase):
         interpretation.dimensions = []
         plan, sql = compile_sql_query(interpretation, RetrievalResult([], [], []), build_catalog())
         lowered = sql.lower()
-        self.assertIn("from fact.orders as fo", lowered)
+        self.assertRegex(lowered, r"from\s+fact\.orders\s+(?:as\s+)?fo")
         self.assertIn("count(distinct fo.order_id)", lowered)
         self.assertNotIn("mart_orders", lowered)
         self.assertEqual(plan.metric_label, "Завершённые поездки")

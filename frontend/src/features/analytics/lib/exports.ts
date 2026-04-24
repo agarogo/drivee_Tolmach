@@ -7,12 +7,18 @@ function csvValue(value: unknown) {
 export function exportRowsToCsv(
   rows: QueryResultRow[],
   fileName = "tolmach-result-snapshot.csv",
+  columns?: string[],
 ) {
   if (!rows.length) return;
-  const columns = Object.keys(rows[0]);
+  const orderedColumns = columns && columns.length ? columns : Array.from(
+    rows.reduce((all, row) => {
+      Object.keys(row).forEach((key) => all.add(key));
+      return all;
+    }, new Set<string>()),
+  );
   const csv = [
-    columns.join(","),
-    ...rows.map((row) => columns.map((column) => csvValue(row[column])).join(",")),
+    orderedColumns.join(","),
+    ...rows.map((row) => orderedColumns.map((column) => csvValue(row[column])).join(",")),
   ].join("\n");
 
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));

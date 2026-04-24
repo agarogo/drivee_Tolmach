@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { RefObject } from "react";
 import type { QueryResult } from "../../../shared/types";
 import { exportNodeToPdf, exportNodeToPng, exportRowsToCsv } from "../lib/exports";
-import { getSnapshotRows } from "../lib/queryPresentation";
+import { getSnapshotColumns, getSnapshotRows } from "../lib/queryPresentation";
 
 export function ResultExportActions({
   query,
@@ -13,6 +13,7 @@ export function ResultExportActions({
 }) {
   const [exporting, setExporting] = useState<"" | "png" | "pdf">("");
   const rows = getSnapshotRows(query);
+  const columns = getSnapshotColumns(query);
   const fileBaseName = `tolmach-${query.id.slice(0, 8)}`;
   const canExportVisual = query.status === "success" && rows.length > 0 && Boolean(exportRef.current);
 
@@ -53,7 +54,7 @@ export function ResultExportActions({
           type="button"
           className="ghost-btn"
           disabled={!rows.length}
-          onClick={() => exportRowsToCsv(rows, `${fileBaseName}-snapshot.csv`)}
+          onClick={() => exportRowsToCsv(rows, `${fileBaseName}-snapshot.csv`, columns.map((column) => column.key))}
         >
           Export CSV snapshot
         </button>

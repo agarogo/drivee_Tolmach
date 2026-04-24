@@ -19,19 +19,31 @@ def recommend_chart(rows: list[dict]) -> dict:
     if not rows:
         return {"type": "table_only"}
 
-    first = rows[0]
-    columns = list(first.keys())
+    columns: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for column in row.keys():
+            if column not in seen:
+                seen.add(column)
+                columns.append(column)
+
+    def values_for(column: str):
+        return [row.get(column) for row in rows if row.get(column) is not None]
+
     numeric_cols = [
         col
         for col in columns
-        if isinstance(first.get(col), Number)
-        and not isinstance(first.get(col), bool)
+        if values_for(col)
+        and all(isinstance(value, Number) and not isinstance(value, bool) for value in values_for(col))
     ]
     date_cols = [
         col
         for col in columns
-        if isinstance(first.get(col), (date, datetime))
-        or col.lower() in {"date", "day", "week", "month", "created_at"}
+        if values_for(col)
+        and (
+            all(isinstance(value, (date, datetime)) for value in values_for(col))
+            or col.lower() in {"date", "day", "week", "month", "created_at"}
+        )
     ]
     category_cols = [col for col in columns if col not in numeric_cols]
 

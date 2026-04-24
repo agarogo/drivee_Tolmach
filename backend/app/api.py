@@ -2,7 +2,7 @@ from datetime import datetime, time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.orchestrator import run_query_workflow
@@ -14,6 +14,7 @@ from app.models import (
     Message,
     Query,
     QueryClarification,
+    QueryExecutionAudit,
     QueryEvent,
     Report,
     ReportArtifact,
@@ -39,6 +40,7 @@ from app.schemas import (
     AssistantMessageResponse,
     AuthResponse,
     BenchmarkPresetOut,
+    ChatDeleteOut,
     ChatOut,
     ClarificationOut,
     DimensionCatalogCreate,
@@ -158,6 +160,63 @@ async def ensure_query_chat(db: AsyncSession, user: User, chat_id: UUID | None, 
     return chat
 
 
+async def delete_chat_with_related_data(db: AsyncSession, chat: Chat) -> dict[str, int]:
+    query_ids = list(
+        (
+            await db.scalars(
+                select(Query.id).where(Query.chat_id == chat.id)
+            )
+        ).all()
+    )
+    counts = {
+        "messages": int(await db.scalar(select(func.count(Message.id)).where(Message.chat_id == chat.id)) or 0),
+        "queries": len(query_ids),
+        "clarifications": 0,
+        "events": 0,
+        "guardrail_logs": 0,
+        "reports_detached": 0,
+        "query_audits_detached": 0,
+    }
+    if query_ids:
+        counts["clarifications"] = int(
+            await db.scalar(select(func.count(QueryClarification.id)).where(QueryClarification.query_id.in_(query_ids)))
+            or 0
+        )
+        counts["events"] = int(
+            await db.scalar(select(func.count(QueryEvent.id)).where(QueryEvent.query_id.in_(query_ids))) or 0
+        )
+        counts["guardrail_logs"] = int(
+            await db.scalar(select(func.count(SqlGuardrailLog.id)).where(SqlGuardrailLog.query_id.in_(query_ids))) or 0
+        )
+        counts["reports_detached"] = int(
+            await db.scalar(select(func.count(Report.id)).where(Report.query_id.in_(query_ids))) or 0
+        )
+        counts["query_audits_detached"] = int(
+            await db.scalar(select(func.count(QueryExecutionAudit.id)).where(QueryExecutionAudit.query_id.in_(query_ids)))
+            or 0
+        )
+
+        await db.execute(
+            update(Report)
+            .where(Report.query_id.in_(query_ids))
+            .values(query_id=None, updated_at=datetime.utcnow())
+        )
+        await db.execute(
+            update(QueryExecutionAudit)
+            .where(QueryExecutionAudit.query_id.in_(query_ids))
+            .values(query_id=None)
+        )
+        await db.execute(delete(QueryClarification).where(QueryClarification.query_id.in_(query_ids)))
+        await db.execute(delete(QueryEvent).where(QueryEvent.query_id.in_(query_ids)))
+        await db.execute(delete(SqlGuardrailLog).where(SqlGuardrailLog.query_id.in_(query_ids)))
+        await db.execute(delete(Query).where(Query.id.in_(query_ids)))
+
+    await db.execute(delete(Message).where(Message.chat_id == chat.id))
+    await db.delete(chat)
+    await db.flush()
+    return counts
+
+
 async def require_owned_query(db: AsyncSession, query_id: UUID, user: User) -> Query:
     item = await db.get(Query, query_id)
     if not item or item.user_id != user.id:
@@ -173,7 +232,9 @@ async def require_owned_report(db: AsyncSession, report_id: UUID, user: User) ->
 
 
 async def require_owned_schedule(db: AsyncSession, schedule_id: UUID, user: User) -> Schedule:
-    item = await require_owned_schedule(db, schedule_id, user)
+    item = await db.get(Schedule, schedule_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Расписание не найдено")
     await require_owned_report(db, item.report_id, user)
     return item
 
@@ -219,6 +280,10 @@ async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
         ambiguity_flags=item.ambiguity_flags_json,
         rows_returned=item.rows_returned,
         execution_ms=item.execution_ms,
+        answer_type_code=item.answer_type_code,
+        answer_type_key=item.answer_type_key,
+        primary_view_mode=item.primary_view_mode,
+        answer=item.answer_envelope_json or None,
         chart_type=item.chart_type,
         chart_spec=item.chart_spec,
         result_snapshot=item.result_snapshot,
@@ -231,6 +296,16 @@ async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
+
+
+def assistant_payload_from_query(output: QueryOut, item: Query) -> dict:
+    return {
+        **output.model_dump(mode="json"),
+        "type": item.status,
+        "rows": item.result_snapshot,
+        "sql": item.corrected_sql or item.generated_sql,
+        "answer": output.answer.model_dump(mode="json") if output.answer else None,
+    }
 
 
 async def run_to_out(db: AsyncSession, item: ScheduleRun) -> ScheduleRunOut:
@@ -461,12 +536,7 @@ async def run_query(
         chat_id=chat.id,
         role="assistant",
         content=item.ai_answer or "Готово.",
-        payload={
-            **output.model_dump(mode="json"),
-            "type": item.status,
-            "rows": item.result_snapshot,
-            "sql": item.corrected_sql or item.generated_sql,
-        },
+        payload=assistant_payload_from_query(output, item),
     )
     chat.updated_at = datetime.utcnow()
     db.add(assistant_message)
@@ -510,12 +580,7 @@ async def clarify_query(
                 chat_id=chat.id,
                 role="assistant",
                 content=item.ai_answer or "Готово.",
-                payload={
-                    **output.model_dump(mode="json"),
-                    "type": item.status,
-                    "rows": item.result_snapshot,
-                    "sql": item.corrected_sql or item.generated_sql,
-                },
+                payload=assistant_payload_from_query(output, item),
             )
         )
         chat.updated_at = datetime.utcnow()
@@ -1129,6 +1194,18 @@ async def create_chat(db: AsyncSession = Depends(get_db), user: User = Depends(g
     return await chat_out(db, chat)
 
 
+@router.delete("/api/chats/{chat_id}", response_model=ChatDeleteOut)
+async def delete_chat(
+    chat_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ChatDeleteOut:
+    chat = await require_owned_chat(db, chat_id, user)
+    counts = await delete_chat_with_related_data(db, chat)
+    await db.commit()
+    return ChatDeleteOut(id=chat_id, deleted=True, deleted_related_counts=counts)
+
+
 @router.get("/api/chats/{chat_id}/messages", response_model=MessagesPage)
 async def list_messages(
     chat_id: UUID,
@@ -1174,12 +1251,12 @@ async def send_message(
     db.add(user_message)
     await db.flush()
     query = await run_query_workflow(db, user, question, chat_id)
-    query_payload = (await query_to_out(db, query)).model_dump(mode="json")
+    output = await query_to_out(db, query)
     assistant_message = Message(
         chat_id=chat.id,
         role="assistant",
         content=query.ai_answer,
-        payload={**query_payload, "type": query.status, "rows": query.result_snapshot, "sql": query.corrected_sql or query.generated_sql},
+        payload=assistant_payload_from_query(output, query),
     )
     chat.updated_at = datetime.utcnow()
     db.add(assistant_message)

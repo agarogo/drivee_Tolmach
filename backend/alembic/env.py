@@ -17,12 +17,12 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", settings.platform_database_url)
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.database_url,
+        url=settings.platform_database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

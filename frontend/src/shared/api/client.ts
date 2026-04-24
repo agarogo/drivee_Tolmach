@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { AxiosHeaders } from "axios";
 
 export const TOKEN_KEY = "tolmach_token";
 
@@ -21,8 +21,9 @@ export function clearToken() {
 api.interceptors.request.use((config) => {
   const token = getStoredToken();
   if (token) {
-    config.headers = config.headers || {};
-    (config.headers as any).Authorization = `Bearer ${token}`;
+    const headers = AxiosHeaders.from(config.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    config.headers = headers;
   }
   return config;
 });
