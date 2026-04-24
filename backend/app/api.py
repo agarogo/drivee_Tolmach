@@ -1,12 +1,24 @@
+import logging
 from datetime import datetime, time
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery, status
+from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery, Request, Response, status
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.gateway.providers import LLMProviderError
 from app.ai.orchestrator import run_query_workflow
-from app.auth import create_access_token, get_current_user, hash_password, require_admin, verify_password
+from app.auth import (
+    apply_session_cookies,
+    clear_session_cookies,
+    create_session_bundle,
+    get_current_user,
+    hash_password,
+    require_admin,
+    revoke_session,
+    verify_password,
+)
 from app.config import get_settings
 from app.db import get_db
 from app.models import (
@@ -49,6 +61,7 @@ from app.schemas import (
     GuardrailLogOut,
     LogOut,
     LoginRequest,
+    LogoutResponse,
     MessageOut,
     MetricCatalogCreate,
     MetricCatalogOut,
@@ -120,6 +133,7 @@ from app.reports import (
 )
 router = APIRouter()
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def to_user_out(user: User) -> UserOut:
@@ -131,6 +145,93 @@ def make_chat_title(question: str) -> str:
     if len(compact) <= 30:
         return compact
     return compact[:29].rstrip() + "..."
+
+
+def _device_hint(request: Request) -> str:
+    user_agent = (request.headers.get("user-agent") or "").strip()
+    client_host = request.client.host if request.client else ""
+    return " | ".join(part for part in (user_agent[:200], client_host) if part)[:255]
+
+
+def _normalize_provider_name(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"fallback_rule", "fallback"}:
+        return "fallback"
+    if normalized in {"ollama", "production"}:
+        return normalized
+    return normalized
+
+
+def _query_ai_telemetry(item: Query) -> dict[str, Any]:
+    interpretation = item.interpretation_json if isinstance(item.interpretation_json, dict) else {}
+    resolved_request = item.resolved_request_json if isinstance(item.resolved_request_json, dict) else {}
+    candidates: list[dict[str, Any]] = []
+
+    answer_type_decision = resolved_request.get("answer_type_decision")
+    if isinstance(answer_type_decision, dict):
+        provider = _normalize_provider_name(answer_type_decision.get("provider"))
+        candidates.append(
+            {
+                "provider": provider,
+                "model": str(answer_type_decision.get("llm_model") or ""),
+                "llm_used": bool(answer_type_decision.get("llm_used")),
+                "fallback_used": bool(answer_type_decision.get("fallback_used") or provider == "fallback"),
+            }
+        )
+
+    for key in (
+        "intent_telemetry",
+        "clarification_telemetry",
+        "llm_sql_plan_telemetry",
+        "answer_summary_telemetry",
+    ):
+        telemetry = interpretation.get(key)
+        if not isinstance(telemetry, dict):
+            continue
+        provider = _normalize_provider_name(telemetry.get("provider"))
+        candidates.append(
+            {
+                "provider": provider,
+                "model": str(telemetry.get("model") or ""),
+                "llm_used": provider not in {"", "fallback"},
+                "fallback_used": bool(telemetry.get("fallback_used") or provider == "fallback"),
+            }
+        )
+
+    llm_used = any(bool(candidate.get("llm_used")) for candidate in candidates)
+    fallback_used = any(bool(candidate.get("fallback_used")) for candidate in candidates)
+    if llm_used:
+        primary = next(candidate for candidate in reversed(candidates) if bool(candidate.get("llm_used")))
+    else:
+        primary = candidates[-1] if candidates else {}
+    provider = str(primary.get("provider") or ("fallback" if fallback_used else ""))
+    llm_model = str(primary.get("model") or "")
+
+    return {
+        "provider": provider,
+        "llm_provider": provider,
+        "llm_model": llm_model,
+        "llm_used": llm_used,
+        "fallback_used": fallback_used,
+        "retrieval_used": True,
+    }
+
+
+async def _run_query_workflow_or_503(
+    db: AsyncSession,
+    user: User,
+    question: str,
+    chat_id: UUID | None,
+) -> Query:
+    try:
+        return await run_query_workflow(db, user, question, chat_id)
+    except LLMProviderError as exc:
+        await db.rollback()
+        logger.error("LLM dependency is unavailable for question processing: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
 
 async def chat_out(db: AsyncSession, chat: Chat) -> ChatOut:
@@ -240,6 +341,7 @@ async def require_owned_schedule(db: AsyncSession, schedule_id: UUID, user: User
 
 
 async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
+    ai_telemetry = _query_ai_telemetry(item)
     events = list(
         (
             await db.scalars(
@@ -280,6 +382,12 @@ async def query_to_out(db: AsyncSession, item: Query) -> QueryOut:
         ambiguity_flags=item.ambiguity_flags_json,
         rows_returned=item.rows_returned,
         execution_ms=item.execution_ms,
+        provider=ai_telemetry["provider"],
+        llm_provider=ai_telemetry["llm_provider"],
+        llm_model=ai_telemetry["llm_model"],
+        llm_used=ai_telemetry["llm_used"],
+        fallback_used=ai_telemetry["fallback_used"],
+        retrieval_used=ai_telemetry["retrieval_used"],
         answer_type_code=item.answer_type_code,
         answer_type_key=item.answer_type_key,
         primary_view_mode=item.primary_view_mode,
@@ -457,10 +565,13 @@ async def health() -> dict:
         "status": "ok",
         "app": "Толмач by Drivee",
         "database": "postgresql",
-        "database_name": settings.analytics_database_name,
+        "platform_database_name": settings.platform_database_label,
+        "analytics_database_name": settings.analytics_database_label,
         "mode": "read-only analytics executor",
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
+        "llm_strict_mode": settings.llm_strict_mode,
+        "llm_rule_fallback_allowed": settings.llm_fallback_allowed,
     }
 
 
@@ -479,7 +590,12 @@ async def traces_link() -> dict:
 
 
 @router.post("/auth/register", response_model=AuthResponse)
-async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+async def register(
+    payload: RegisterRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> AuthResponse:
     email = payload.email.strip().lower()
     if "@" not in email:
         raise HTTPException(status_code=400, detail="Введите корректный email")
@@ -493,21 +609,42 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         preferences={"theme": "dark"},
     )
     db.add(user)
+    await db.flush()
+    bundle = await create_session_bundle(db, user=user, device_hint=_device_hint(request))
+    apply_session_cookies(response, bundle)
     await db.commit()
     await db.refresh(user)
-    token = create_access_token({"sub": str(user.id), "email": user.email, "role": user.role})
-    return AuthResponse(access_token=token, user=to_user_out(user))
+    return AuthResponse(user=to_user_out(user))
 
 
 @router.post("/auth/login", response_model=AuthResponse)
-async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> AuthResponse:
     user = await db.scalar(select(User).where(User.email == payload.email.strip().lower()))
     if not user or not verify_password(payload.password, user.password_hash) or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
     user.last_login_at = datetime.utcnow()
+    bundle = await create_session_bundle(db, user=user, device_hint=_device_hint(request))
+    apply_session_cookies(response, bundle)
     await db.commit()
-    token = create_access_token({"sub": str(user.id), "email": user.email, "role": user.role})
-    return AuthResponse(access_token=token, user=to_user_out(user))
+    return AuthResponse(user=to_user_out(user))
+
+
+@router.post("/auth/logout", response_model=LogoutResponse)
+async def logout(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> LogoutResponse:
+    await revoke_session(db, request.cookies.get(settings.session_cookie_name))
+    await db.commit()
+    clear_session_cookies(response)
+    return LogoutResponse(ok=True)
 
 
 @router.get("/auth/me", response_model=UserOut)
@@ -530,7 +667,7 @@ async def run_query(
     db.add(user_message)
     await db.flush()
 
-    item = await run_query_workflow(db, user, question, chat.id)
+    item = await _run_query_workflow_or_503(db, user, question, chat.id)
     output = await query_to_out(db, item)
     assistant_message = Message(
         chat_id=chat.id,
@@ -572,7 +709,7 @@ async def clarify_query(
         chat = await require_owned_chat(db, original.chat_id, user)
         db.add(Message(chat_id=chat.id, role="user", content=answer, payload={"clarifies_query_id": str(original.id)}))
         await db.flush()
-    item = await run_query_workflow(db, user, clarified_question, original.chat_id)
+    item = await _run_query_workflow_or_503(db, user, clarified_question, original.chat_id)
     output = await query_to_out(db, item)
     if chat:
         db.add(
@@ -1250,7 +1387,7 @@ async def send_message(
     user_message = Message(chat_id=chat.id, role="user", content=question, payload={})
     db.add(user_message)
     await db.flush()
-    query = await run_query_workflow(db, user, question, chat_id)
+    query = await _run_query_workflow_or_503(db, user, question, chat_id)
     output = await query_to_out(db, query)
     assistant_message = Message(
         chat_id=chat.id,

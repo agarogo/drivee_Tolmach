@@ -1,39 +1,32 @@
 import axios, { AxiosHeaders } from "axios";
 
-export const TOKEN_KEY = "tolmach_token";
+const CSRF_COOKIE_NAME = import.meta.env.VITE_CSRF_COOKIE_NAME || "tolmach_csrf";
+const CSRF_HEADER_NAME = import.meta.env.VITE_CSRF_HEADER_NAME || "X-CSRF-Token";
+const SAFE_METHODS = new Set(["get", "head", "options"]);
 
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "http://localhost:8000",
+  withCredentials: true,
 });
 
-export function getStoredToken() {
-  return localStorage.getItem(TOKEN_KEY) || "";
-}
-
-export function storeToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token);
-}
-
-export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
+function readCookie(name: string) {
+  if (typeof document === "undefined") return "";
+  const prefix = `${encodeURIComponent(name)}=`;
+  const cookie = document.cookie
+    .split("; ")
+    .find((entry) => entry.startsWith(prefix));
+  return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
 }
 
 api.interceptors.request.use((config) => {
-  const token = getStoredToken();
-  if (token) {
+  const method = (config.method || "get").toLowerCase();
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME);
     const headers = AxiosHeaders.from(config.headers);
-    headers.set("Authorization", `Bearer ${token}`);
+    if (csrfToken) {
+      headers.set(CSRF_HEADER_NAME, csrfToken);
+    }
     config.headers = headers;
   }
   return config;
 });
-
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error?.response?.status === 401) {
-      clearToken();
-    }
-    return Promise.reject(error);
-  }
-);

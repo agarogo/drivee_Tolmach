@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace
 import json
+import logging
 import re
 from typing import Any, Generic, TypeVar
 
@@ -17,6 +18,7 @@ from app.ai.gateway.providers import (
     RenderedPrompt,
 )
 from app.ai.gateway.schemas import (
+    AnswerTypeClassificationResult,
     AnswerSummaryDraft,
     ClarificationNeedResult,
     IntentExtractionResult,
@@ -30,7 +32,15 @@ from app.semantic.errors import ClarificationCode, build_clarification_reason
 from app.semantic.service import SemanticCatalog
 
 settings = get_settings()
-StructuredModelT = TypeVar("StructuredModelT", IntentExtractionResult, ClarificationNeedResult, SQLPlanDraft, AnswerSummaryDraft)
+logger = logging.getLogger(__name__)
+StructuredModelT = TypeVar(
+    "StructuredModelT",
+    AnswerTypeClassificationResult,
+    IntentExtractionResult,
+    ClarificationNeedResult,
+    SQLPlanDraft,
+    AnswerSummaryDraft,
+)
 
 
 @dataclass(frozen=True)
@@ -280,6 +290,10 @@ def _primary_provider() -> LLMProvider:
     if provider_name == "ollama":
         return OllamaLLMProvider()
     if provider_name in {"fallback_rule", "fallback"}:
+        if not settings.llm_fallback_allowed:
+            raise LLMProviderError(
+                "Fallback provider is disabled when APP_ENV is demo/production or LLM_STRICT_MODE=true."
+            )
         return FallbackRuleProvider()
     raise LLMProviderError(f"Unsupported LLM_PROVIDER value: {settings.llm_provider}")
 
@@ -291,10 +305,15 @@ class AIGateway:
         prompt_registry: PromptRegistry | None = None,
         primary_provider: LLMProvider | None = None,
         fallback_provider: LLMProvider | None = None,
+        allow_rule_fallback: bool | None = None,
     ) -> None:
         self.prompt_registry = prompt_registry or get_prompt_registry()
         self.primary_provider = primary_provider or _primary_provider()
-        self.fallback_provider = fallback_provider or FallbackRuleProvider()
+        if fallback_provider is not None:
+            self.fallback_provider: LLMProvider | None = fallback_provider
+        else:
+            fallback_enabled = settings.llm_fallback_allowed if allow_rule_fallback is None else allow_rule_fallback
+            self.fallback_provider = FallbackRuleProvider() if fallback_enabled else None
 
     async def _run_stage(
         self,
@@ -316,6 +335,20 @@ class AIGateway:
         try:
             response = await self.primary_provider.generate_structured(rendered_prompt, schema)
         except LLMProviderError as exc:
+            if not settings.llm_fallback_allowed or self.fallback_provider is None:
+                logger.error(
+                    "LLM stage failed without rule fallback: prompt_key=%s provider=%s reason=%s",
+                    prompt_key,
+                    getattr(self.primary_provider, "provider_name", ""),
+                    exc,
+                )
+                raise
+            logger.warning(
+                "LLM stage fell back to deterministic provider: prompt_key=%s provider=%s reason=%s",
+                prompt_key,
+                getattr(self.primary_provider, "provider_name", ""),
+                exc,
+            )
             response = await self.fallback_provider.generate_structured(rendered_prompt, schema)
             response = replace(
                 response,
@@ -326,6 +359,24 @@ class AIGateway:
                 ),
             )
         return GatewayStageResult(structured=response.result, response=response)
+
+    async def classify_answer_type(
+        self,
+        question: str,
+        chat_context: dict[str, Any] | None,
+        retrieval: RetrievalResult,
+    ) -> GatewayStageResult[AnswerTypeClassificationResult]:
+        return await self._run_stage(
+            prompt_key="answer_type_classifier",
+            schema=AnswerTypeClassificationResult,
+            context={
+                "question": question,
+                "chat_context_json": _safe_json(chat_context or {}),
+                "matched_semantic_terms_json": _safe_json(retrieval.semantic_terms[:8]),
+                "templates_json": _safe_json(retrieval.templates[:3]),
+                "examples_json": _safe_json(retrieval.examples[:3]),
+            },
+        )
 
     async def extract_intent(
         self,
@@ -428,6 +479,18 @@ class AIGateway:
 
 def create_ai_gateway() -> AIGateway:
     return AIGateway()
+
+
+def create_classifier_gateway() -> AIGateway:
+    return AIGateway(allow_rule_fallback=False)
+
+
+async def classify_answer_type_with_ai(
+    question: str,
+    chat_context: dict[str, Any] | None,
+    retrieval: RetrievalResult,
+) -> GatewayStageResult[AnswerTypeClassificationResult]:
+    return await create_classifier_gateway().classify_answer_type(question, chat_context, retrieval)
 
 
 async def extract_intent_with_ai(

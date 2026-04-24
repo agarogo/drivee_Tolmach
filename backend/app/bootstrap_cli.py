@@ -1,12 +1,12 @@
 import argparse
 import asyncio
 
-from app.db import AsyncSessionLocal
+from app.db import PlatformSessionLocal
 from app.services.bootstrap import bootstrap_demo_data
 
 
 async def _run(allow_nonlocal: bool) -> None:
-    async with AsyncSessionLocal() as db:
+    async with PlatformSessionLocal() as db:
         await bootstrap_demo_data(db, allow_nonlocal=allow_nonlocal)
 
 

@@ -61,7 +61,7 @@ class AIGatewayTests(unittest.IsolatedAsyncioTestCase):
             RetrievalResult([], [], []),
             build_catalog(),
         )
-        self.assertEqual(result.response.provider, "fallback_rule")
+        self.assertEqual(result.response.provider, "fallback")
         self.assertTrue(result.response.telemetry.fallback_used)
         self.assertEqual(result.response.telemetry.initial_provider, "broken")
         self.assertIn("synthetic upstream failure", result.response.telemetry.fallback_reason)

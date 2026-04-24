@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
-from app.db import AsyncSessionLocal
+from app.db import PlatformSessionLocal
 from app.models import Report, ReportArtifact, ReportDelivery, ReportRecipient, ReportVersion, Schedule, ScheduleRun, User
 from app.reports.artifacts import BuiltArtifact, build_report_artifacts
 from app.reports.delivery import DeliveryPayload, get_delivery_adapter
@@ -412,14 +412,14 @@ async def run_scheduler_cycle() -> dict[str, Any]:
     enqueued = 0
     processed = 0
     failed = 0
-    async with AsyncSessionLocal() as db:
+    async with PlatformSessionLocal() as db:
         queued_runs = await enqueue_due_schedules(db)
         claimed_ids = await claim_runnable_runs(db)
         enqueued = len(queued_runs)
         await db.commit()
 
     for run_id in claimed_ids:
-        async with AsyncSessionLocal() as db:
+        async with PlatformSessionLocal() as db:
             try:
                 run = await execute_report_run(db, run_id)
                 if run.status == "failed":
@@ -440,7 +440,7 @@ async def run_scheduler_cycle() -> dict[str, Any]:
 
 async def _best_effort_worker_heartbeat(*, status: str, metadata: dict[str, Any] | None = None) -> None:
     try:
-        async with AsyncSessionLocal() as db:
+        async with PlatformSessionLocal() as db:
             await record_worker_heartbeat(
                 db,
                 worker_name=scheduler_worker_name(),

@@ -7,9 +7,8 @@ import { ProfilePage } from "../features/profile/ProfilePage";
 import { ReportsPage } from "../features/reports/ReportsPage";
 import { SchedulesPage } from "../features/schedules/SchedulesPage";
 import { TemplatesPage } from "../features/templates/TemplatesPage";
-import { fetchMe } from "../shared/api/auth";
+import { fetchMe, logout as logoutRequest } from "../shared/api/auth";
 import { fetchChats } from "../shared/api/chats";
-import { clearToken, getStoredToken, storeToken } from "../shared/api/client";
 import { fetchReport, fetchReports, runReport } from "../shared/api/reports";
 import { fetchSchedules, toggleSchedule } from "../shared/api/schedules";
 import { fetchTemplates } from "../shared/api/templates";
@@ -43,18 +42,12 @@ export default function App() {
   const authenticated = authStatus === "authenticated" && Boolean(user);
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setAuthStatus("guest");
-      return;
-    }
     fetchMe()
       .then((nextUser) => {
         setUser(nextUser);
         setAuthStatus("authenticated");
       })
       .catch(() => {
-        clearToken();
         setUser(null);
         setAuthStatus("guest");
       });
@@ -94,20 +87,24 @@ export default function App() {
   const currentScheduleId = selectedScheduleId || schedules[0]?.id;
 
   function onAuth(auth: AuthResponse) {
-    storeToken(auth.access_token);
     setUser(auth.user);
     setAuthStatus("authenticated");
   }
 
-  function logout() {
-    clearToken();
-    setUser(null);
-    setAuthStatus("guest");
-    setView("analytics");
-    analytics.resetAnalytics();
-    setSelectedReportId("");
-    setSelectedScheduleId("");
-    queryClient.clear();
+  async function logout() {
+    try {
+      await logoutRequest();
+    } catch {
+      // Clear local state even if the backend session is already gone.
+    } finally {
+      setUser(null);
+      setAuthStatus("guest");
+      setView("analytics");
+      analytics.resetAnalytics();
+      setSelectedReportId("");
+      setSelectedScheduleId("");
+      queryClient.clear();
+    }
   }
 
   async function handleRunReport(id: string) {

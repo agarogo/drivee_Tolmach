@@ -5,14 +5,14 @@ import asyncio
 import json
 
 from app.config import get_settings
-from app.db import AsyncSessionLocal
+from app.db import PlatformSessionLocal
 from app.query_execution.benchmarks import run_benchmark_suite
 
 settings = get_settings()
 
 
 async def _run(iterations: int, role: str) -> None:
-    async with AsyncSessionLocal() as db:
+    async with PlatformSessionLocal() as db:
         payload = await run_benchmark_suite(db, iterations=iterations, role=role)
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 

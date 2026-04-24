@@ -29,9 +29,11 @@ class LoginRequest(BaseModel):
 
 
 class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
     user: UserOut
+
+
+class LogoutResponse(BaseModel):
+    ok: bool = True
 
 
 class ChatOut(BaseModel):
@@ -163,6 +165,12 @@ class QueryOut(BaseModel):
     ambiguity_flags: list[str]
     rows_returned: int
     execution_ms: int
+    provider: str = ""
+    llm_provider: str = ""
+    llm_model: str = ""
+    llm_used: bool = False
+    fallback_used: bool = False
+    retrieval_used: bool = False
     answer_type_code: int = 5
     answer_type_key: str = "table"
     primary_view_mode: str = "table"

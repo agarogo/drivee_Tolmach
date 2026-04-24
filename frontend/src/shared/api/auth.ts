@@ -1,5 +1,5 @@
 import { api } from "./client";
-import type { AuthResponse, RegisterPayload, User } from "../types";
+import type { AuthResponse, LogoutResponse, RegisterPayload, User } from "../types";
 
 export async function login(email: string, password: string) {
   const { data } = await api.post<AuthResponse>("/auth/login", { email, password });
@@ -13,5 +13,10 @@ export async function register(payload: RegisterPayload) {
 
 export async function fetchMe() {
   const { data } = await api.get<User>("/auth/me");
+  return data;
+}
+
+export async function logout() {
+  const { data } = await api.post<LogoutResponse>("/auth/logout");
   return data;
 }

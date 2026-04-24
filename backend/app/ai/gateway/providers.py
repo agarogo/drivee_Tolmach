@@ -317,7 +317,7 @@ class OllamaLLMProvider(BaseHTTPLLMProvider):
 
 
 class FallbackRuleProvider:
-    provider_name = "fallback_rule"
+    provider_name = "fallback"
     model_name = "deterministic-v1"
 
     async def generate_structured(

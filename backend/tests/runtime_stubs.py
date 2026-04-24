@@ -8,8 +8,9 @@ from pydantic import BaseModel
 
 
 def install_runtime_stubs() -> None:
-    os.environ.setdefault("DATABASE_URL", "postgresql://user:pass@localhost/testdb")
-    os.environ.setdefault("FRONTEND_ORIGIN", "http://localhost:5173")
+    os.environ.setdefault("PLATFORM_DATABASE_URL", "postgresql://user:pass@localhost/testdb")
+    os.environ.setdefault("ANALYTICS_DATABASE_URL", "postgresql://user:pass@localhost/testdb")
+    os.environ.setdefault("FRONTEND_ORIGINS", "http://localhost:5173")
 
     if "pydantic_settings" not in sys.modules:
         stub = types.ModuleType("pydantic_settings")
@@ -26,7 +27,11 @@ def install_runtime_stubs() -> None:
         def settings_config_dict(**kwargs):
             return kwargs
 
+        class NoDecode:
+            pass
+
         stub.BaseSettings = StubBaseSettings
+        stub.NoDecode = NoDecode
         stub.SettingsConfigDict = settings_config_dict
         sys.modules["pydantic_settings"] = stub
 
@@ -82,7 +87,7 @@ def install_runtime_stubs() -> None:
 
         class DummySessionMaker:
             def __call__(self, *args, **kwargs):
-                raise RuntimeError("AsyncSessionLocal is not available in stubbed tests.")
+                raise RuntimeError("PlatformSessionLocal is not available in stubbed tests.")
 
         sqlalchemy_asyncio.create_async_engine = fake_create_async_engine
         sqlalchemy_asyncio.async_sessionmaker = lambda *args, **kwargs: DummySessionMaker()

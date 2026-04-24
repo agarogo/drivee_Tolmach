@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from typing import Annotated
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 def _normalize_postgres_dsn(value: str, field_name: str) -> str:
@@ -40,12 +41,11 @@ class Settings(BaseSettings):
 
     platform_database_url: str = ""
     analytics_database_url: str = ""
-    database_url: str = ""
 
-    frontend_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    frontend_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"]
+    )
 
-    jwt_secret: str = "change-me-in-production"
-    jwt_ttl_minutes: int = 60 * 24 * 7
     session_ttl_hours: int = 24 * 7
     session_cookie_name: str = "tolmach_session"
     session_cookie_secure: bool = False
@@ -55,6 +55,8 @@ class Settings(BaseSettings):
 
     llm_provider: str = "ollama"
     llm_model: str = "qwen3:4b"
+    llm_strict_mode: bool = False
+    llm_rule_fallback_enabled: bool = True
     ollama_base_url: str = "http://localhost:11434"
     production_llm_base_url: str = ""
     production_llm_api_key: str = ""
@@ -67,6 +69,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 2
     llm_retry_backoff_ms: int = 250
+    llm_prompt_classifier_version: str = "v1"
     llm_prompt_intent_version: str = "v1"
     llm_prompt_clarification_version: str = "v1"
     llm_prompt_plan_version: str = "v1"
@@ -116,7 +119,6 @@ class Settings(BaseSettings):
     report_slack_webhook_url: str = ""
     report_delivery_timeout_seconds: int = 20
     otel_exporter_otlp_endpoint: str = ""
-    analytics_database_name: str = "drivee_prod"
     demo_bootstrap_allow_nonlocal: bool = False
 
     @property
@@ -142,6 +144,10 @@ class Settings(BaseSettings):
         return self.app_env in {"prod", "production"}
 
     @property
+    def is_demo(self) -> bool:
+        return self.app_env == "demo"
+
+    @property
     def frontend_origin(self) -> str:
         return self.frontend_origins[0]
 
@@ -161,6 +167,16 @@ class Settings(BaseSettings):
     def analytics_database_label(self) -> str:
         return _database_name_from_dsn(self.analytics_database_url)
 
+    @property
+    def llm_fallback_allowed(self) -> bool:
+        if self.llm_strict_mode or not self.llm_rule_fallback_enabled:
+            return False
+        if self.is_production or self.is_demo:
+            return False
+        if self.llm_provider == "production":
+            return False
+        return True
+
     @field_validator("app_env")
     @classmethod
     def normalize_app_env(cls, value: str) -> str:
@@ -172,6 +188,7 @@ class Settings(BaseSettings):
     @field_validator(
         "llm_provider",
         "embedding_provider",
+        "llm_prompt_classifier_version",
         "llm_prompt_intent_version",
         "llm_prompt_clarification_version",
         "llm_prompt_plan_version",
@@ -226,16 +243,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def normalize_database_urls(self) -> "Settings":
-        legacy_database_url = self.database_url.strip()
-        platform_dsn = self.platform_database_url.strip() or legacy_database_url
+        platform_dsn = self.platform_database_url.strip()
         analytics_dsn = self.analytics_database_url.strip() or platform_dsn
 
         self.platform_database_url = _normalize_postgres_dsn(platform_dsn, "PLATFORM_DATABASE_URL")
         self.analytics_database_url = _normalize_postgres_dsn(analytics_dsn, "ANALYTICS_DATABASE_URL")
-        self.database_url = self.platform_database_url
 
         if self.session_cookie_samesite not in {"lax", "strict", "none"}:
             raise ValueError("SESSION_COOKIE_SAMESITE must be one of: lax, strict, none")
+        if self.session_cookie_samesite == "none" and not self.session_cookie_secure_effective:
+            raise ValueError("SESSION_COOKIE_SAMESITE=none requires SESSION_COOKIE_SECURE=true")
+        if self.llm_provider in {"fallback", "fallback_rule"} and not self.llm_fallback_allowed:
+            raise ValueError(
+                "LLM_PROVIDER=fallback is disabled when APP_ENV is demo/production or LLM_STRICT_MODE=true"
+            )
 
         return self
 

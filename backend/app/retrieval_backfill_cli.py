@@ -6,7 +6,7 @@ import asyncio
 from app.ai.embeddings import EmbeddingProviderError, create_embedding_provider
 from app.ai.retrieval_cache import pgvector_enabled, upsert_embedding_cache
 from app.ai.retrieval_sources import collect_retrieval_sources
-from app.db import AsyncSessionLocal
+from app.db import PlatformSessionLocal
 
 
 async def _run(batch_size: int, entity_type: str | None) -> None:
@@ -14,7 +14,7 @@ async def _run(batch_size: int, entity_type: str | None) -> None:
     if provider is None:
         raise RuntimeError("EMBEDDING_PROVIDER is disabled. Configure embeddings before running backfill.")
 
-    async with AsyncSessionLocal() as db:
+    async with PlatformSessionLocal() as db:
         use_pgvector = await pgvector_enabled(db)
         sources = await collect_retrieval_sources(db)
         if entity_type:

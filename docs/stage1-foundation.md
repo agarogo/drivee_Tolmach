@@ -66,7 +66,7 @@ Backend tests через Docker:
 
 ```bash
 docker build -t drivee-tolmach-backend-test ./backend
-docker run --rm -v "${PWD}/backend:/app" -w /app -e PYTHONPATH=/app -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tolmach drivee-tolmach-backend-test python -m unittest discover tests
+docker run --rm -v "${PWD}/backend:/app" -w /app -e PYTHONPATH=/app -e PLATFORM_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tolmach -e ANALYTICS_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/tolmach drivee-tolmach-backend-test python -m unittest discover tests
 ```
 
 Frontend build:

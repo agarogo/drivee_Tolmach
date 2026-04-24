@@ -3,16 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
 import secrets
-import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
-from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, Request, Response, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,48 +60,6 @@ def verify_password(password: str, encoded: str) -> bool:
 
     actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return hmac.compare_digest(actual, expected)
-
-
-def create_access_token(payload: dict[str, Any]) -> str:
-    now = int(time.time())
-    claims = {
-        **payload,
-        "iat": now,
-        "exp": now + settings.jwt_ttl_minutes * 60,
-    }
-    header = {"alg": "HS256", "typ": "JWT"}
-    signing_input = (
-        f"{_b64url(json.dumps(header, separators=(',', ':')).encode())}."
-        f"{_b64url(json.dumps(claims, separators=(',', ':')).encode())}"
-    )
-    signature = hmac.new(
-        settings.jwt_secret.encode("utf-8"),
-        signing_input.encode("ascii"),
-        hashlib.sha256,
-    ).digest()
-    return f"{signing_input}.{_b64url(signature)}"
-
-
-def decode_access_token(token: str) -> dict[str, Any]:
-    try:
-        header_raw, payload_raw, signature_raw = token.split(".", 2)
-        signing_input = f"{header_raw}.{payload_raw}"
-        expected = hmac.new(
-            settings.jwt_secret.encode("utf-8"),
-            signing_input.encode("ascii"),
-            hashlib.sha256,
-        ).digest()
-        if not hmac.compare_digest(expected, _b64url_decode(signature_raw)):
-            raise ValueError("bad signature")
-        payload = json.loads(_b64url_decode(payload_raw))
-        if int(payload.get("exp", 0)) < int(time.time()):
-            raise ValueError("expired")
-        return payload
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid access token.",
-        ) from exc
 
 
 def hash_session_token(raw_token: str) -> str:
@@ -228,30 +182,10 @@ def require_csrf(request: Request) -> None:
         )
 
 
-async def _user_from_bearer_token(db: AsyncSession, authorization: str) -> User:
-    payload = decode_access_token(authorization.split(" ", 1)[1].strip())
-    user_id = payload.get("sub")
-    try:
-        parsed_user_id = UUID(str(user_id)) if user_id is not None else None
-    except ValueError:
-        parsed_user_id = None
-    user = await db.get(User, parsed_user_id) if parsed_user_id is not None else None
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authenticated user was not found.",
-        )
-    return user
-
-
 async def get_current_user(
     request: Request,
-    authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    if authorization and authorization.lower().startswith("bearer "):
-        return await _user_from_bearer_token(db, authorization)
-
     session_token = request.cookies.get(settings.session_cookie_name)
     if not session_token:
         raise HTTPException(

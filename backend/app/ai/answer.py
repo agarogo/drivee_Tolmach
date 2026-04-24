@@ -52,6 +52,10 @@ from app.services.guardrails import GuardrailDecision, ValidatedSQL
 
 TIME_COLUMN_HINTS = ("date", "day", "week", "month", "year", "time", "hour")
 
+
+class AnswerContractError(RuntimeError):
+    pass
+
 FAQ_HELP_CARDS: dict[str, HelpCard] = {
     "confidence": HelpCard(
         title="Confidence",
@@ -415,9 +419,9 @@ def build_chat_help_envelope(
             grouping=[],
             sorting="",
             limit=0,
-            source="answer_type_classifier",
+            source=f"answer_type_classifier:{decision.classifier_source}",
             provider_confidence=float(decision.confidence_score) / 100.0,
-            fallback_used=False,
+            fallback_used=decision.fallback_used,
             semantic_terms=[str(item.get("term") or item.get("mapped_entity_key") or "") for item in semantic_terms[:8]],
             sql_reasoning=[],
             answer_type_reasoning=decision.reason,
@@ -920,6 +924,11 @@ def build_answer_envelope(
             updated_at=updated_at,
         )
 
+    if status == "success" and render_payload is None:
+        raise AnswerContractError(
+            f"Successful answer_type={decision.answer_type_key} requires a typed render_payload."
+        )
+
     primary_view_mode, available_view_modes, rerender_policy, can_switch_without_requery, switch_options, compatibility = _view_contract(
         decision.answer_type_key,
         render_payload=render_payload,
@@ -968,11 +977,15 @@ def build_answer_envelope(
             grouping=list(primary_plan.group_by if primary_plan else (interpretation.grouping if interpretation else [])),
             sorting=str(primary_plan.order_by if primary_plan else (interpretation.sorting if interpretation else "")),
             limit=int(primary_plan.limit if primary_plan else (interpretation.limit if interpretation else 0)),
-            source=str(interpretation.source if interpretation else "answer_type_classifier"),
+            source=str(
+                interpretation.source
+                if interpretation
+                else f"answer_type_classifier:{decision.classifier_source}"
+            ),
             provider_confidence=float(
                 interpretation.provider_confidence if interpretation and interpretation.provider_confidence else (confidence.score / 100 if confidence else decision.confidence_score / 100)
             ),
-            fallback_used=bool(interpretation.fallback_used if interpretation else False),
+            fallback_used=bool(interpretation.fallback_used if interpretation else decision.fallback_used),
             semantic_terms=[str(item.get("term") or item.get("mapped_entity_key") or "") for item in semantic_terms[:8]],
             sql_reasoning=reasoning_notes,
             answer_type_reasoning=decision.reason,
@@ -1180,6 +1193,7 @@ def compose_answer(
 
 
 __all__ = [
+    "AnswerContractError",
     "build_answer_envelope",
     "build_chat_help_envelope",
     "compose_answer",

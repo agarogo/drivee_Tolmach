@@ -13,7 +13,7 @@ class DataLayerConfigTests(unittest.IsolatedAsyncioTestCase):
         fake_settings = SimpleNamespace(
             is_production=True,
             demo_bootstrap_allow_nonlocal=False,
-            database_url="postgresql://analytics.example.local:5432/drivee",
+            platform_database_url="postgresql://analytics.example.local:5432/drivee",
         )
         with patch("app.services.bootstrap.settings", fake_settings):
             with self.assertRaises(RuntimeError):

@@ -18,11 +18,6 @@ PlatformSessionLocal = async_sessionmaker(
     expire_on_commit=False,
 )
 
-# Compatibility aliases for the existing service layer and scheduler.
-AsyncSessionLocal = PlatformSessionLocal
-async_engine = analytics_engine
-
-
 class Base(DeclarativeBase):
     pass
 

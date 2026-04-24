@@ -1,7 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { login, register } from "../../shared/api/auth";
-import { storeToken } from "../../shared/api/client";
 import type { AuthResponse } from "../../shared/types";
 import { Logo } from "../../shared/ui/Logo";
 
@@ -14,10 +13,7 @@ export function AuthPage({ onAuth }: { onAuth: (auth: AuthResponse) => void }) {
 
   const mutation = useMutation({
     mutationFn: () => (mode === "login" ? login(email, password) : register({ email, password, full_name: fullName, role: "user" })),
-    onSuccess: (auth) => {
-      storeToken(auth.access_token);
-      onAuth(auth);
-    },
+    onSuccess: (auth) => onAuth(auth),
     onError: (err: any) => setError(err?.response?.data?.detail || "Не удалось авторизоваться"),
   });
 

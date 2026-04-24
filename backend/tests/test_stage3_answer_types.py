@@ -323,6 +323,25 @@ class Stage3PlannerTests(unittest.TestCase):
 
 
 class Stage3PayloadTests(unittest.TestCase):
+    def test_successful_answer_requires_typed_render_payload(self) -> None:
+        decision = decision_for("trend")
+
+        with self.assertRaisesRegex(RuntimeError, "typed render_payload"):
+            build_answer_envelope(
+                question="show revenue by day",
+                decision=decision,
+                interpretation=Interpretation(
+                    intent="analytics",
+                    metric="revenue",
+                    dimensions=["day"],
+                    filters={},
+                    date_range={"kind": "between_dates", "label": "April"},
+                ),
+                confidence=ConfidenceResult(score=95, band="high", reasons=[], ambiguities=[]),
+                executed_plan=None,
+                status="success",
+            )
+
     def test_single_value_payload_contains_real_delta(self) -> None:
         primary = sample_block(
             block_key="primary_kpi",

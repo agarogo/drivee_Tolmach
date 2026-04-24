@@ -199,7 +199,7 @@ class SafeExecutionTests(unittest.IsolatedAsyncioTestCase):
             explain_plan={"Plan": {"Total Cost": 1.0}},
             explain_cost=1.0,
         )
-        with patch("app.query_execution.service.async_engine", fake_engine):
+        with patch("app.query_execution.service.analytics_engine", fake_engine):
             rows = await execute_validated_select(validated_sql)
 
         self.assertEqual(rows, [{"city": "Tokyo", "revenue": 123.0}])

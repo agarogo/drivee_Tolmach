@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from typing import Any
+import logging
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.answer_contracts import AnswerTypeCode, AnswerTypeKey, ViewMode
+from app.ai.gateway.providers import LLMProviderError
+from app.ai.gateway.schemas import AnswerTypeClassificationResult
+from app.ai.gateway.service import classify_answer_type_with_ai
 from app.ai.types import RetrievalResult
+from app.config import get_settings
+
+settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 ANSWER_TYPE_LABELS: dict[AnswerTypeCode, str] = {
@@ -161,6 +169,34 @@ SINGLE_VALUE_KEYWORDS = (
 )
 TIME_DIMENSION_KEYS = {"day", "week", "month", "quarter", "year", "hour"}
 CATEGORY_DIMENSION_KEYS = {"city", "driver", "client", "segment", "status", "category"}
+KEY_TO_ANSWER_TYPE: dict[str, AnswerTypeCode] = {key.value: code for code, key in ANSWER_TYPE_KEYS.items()}
+ANSWER_TYPE_KEYWORDS: dict[AnswerTypeCode, tuple[str, ...]] = {
+    AnswerTypeCode.CHAT_HELP: HELP_KEYWORDS,
+    AnswerTypeCode.SINGLE_VALUE: SINGLE_VALUE_KEYWORDS,
+    AnswerTypeCode.COMPARISON_TOP: COMPARISON_KEYWORDS,
+    AnswerTypeCode.TREND: TREND_KEYWORDS,
+    AnswerTypeCode.DISTRIBUTION: DISTRIBUTION_KEYWORDS,
+    AnswerTypeCode.TABLE: TABLE_KEYWORDS,
+    AnswerTypeCode.FULL_REPORT: REPORT_KEYWORDS,
+}
+LLM_DEFAULT_REASONS: dict[AnswerTypeCode, str] = {
+    AnswerTypeCode.CHAT_HELP: "The question is asking for semantic help or product guidance rather than a governed SQL result.",
+    AnswerTypeCode.SINGLE_VALUE: "The question asks for one KPI and does not require a broader chart or record list.",
+    AnswerTypeCode.COMPARISON_TOP: "The question compares categories or asks for a ranked breakdown.",
+    AnswerTypeCode.TREND: "The question is best answered as a time series.",
+    AnswerTypeCode.DISTRIBUTION: "The question asks for composition or share across categories.",
+    AnswerTypeCode.TABLE: "The question is best answered with row-level records.",
+    AnswerTypeCode.FULL_REPORT: "The question asks for a multi-block report instead of a single view.",
+}
+LLM_DEFAULT_EXPLANATIONS: dict[AnswerTypeCode, str] = {
+    AnswerTypeCode.CHAT_HELP: "Classifier routed the question into the help path, so SQL planning is intentionally skipped.",
+    AnswerTypeCode.SINGLE_VALUE: "Classifier selected single-value mode so the planner can focus on one governed KPI.",
+    AnswerTypeCode.COMPARISON_TOP: "Classifier selected comparison mode so the planner can build a ranked category breakdown.",
+    AnswerTypeCode.TREND: "Classifier selected trend mode so the planner can keep grouping and ordering aligned with time.",
+    AnswerTypeCode.DISTRIBUTION: "Classifier selected distribution mode so the planner can compute category shares safely.",
+    AnswerTypeCode.TABLE: "Classifier selected table mode so the planner can compile a governed record query.",
+    AnswerTypeCode.FULL_REPORT: "Classifier selected report mode so the planner can assemble several governed answer blocks.",
+}
 
 
 class AnswerTypeDecision(BaseModel):
@@ -181,6 +217,11 @@ class AnswerTypeDecision(BaseModel):
     preferred_metric_key: str = ""
     preferred_dimension_keys: list[str] = Field(default_factory=list)
     preferred_time_dimension: str = ""
+    classifier_source: Literal["llm", "rules"] = "rules"
+    provider: str = "fallback"
+    llm_model: str = ""
+    llm_used: bool = False
+    fallback_used: bool = True
 
 
 def _normalized(text: str) -> str:
@@ -257,6 +298,11 @@ def _build_decision(
     preferred_metric_key: str = "",
     preferred_dimension_keys: list[str] | None = None,
     preferred_time_dimension: str = "",
+    classifier_source: Literal["llm", "rules"] = "rules",
+    provider: str = "fallback",
+    llm_model: str = "",
+    llm_used: bool = False,
+    fallback_used: bool = True,
 ) -> AnswerTypeDecision:
     return AnswerTypeDecision(
         answer_type=answer_type,
@@ -274,10 +320,15 @@ def _build_decision(
         preferred_metric_key=preferred_metric_key,
         preferred_dimension_keys=list(preferred_dimension_keys or []),
         preferred_time_dimension=preferred_time_dimension,
+        classifier_source=classifier_source,
+        provider=provider,
+        llm_model=llm_model,
+        llm_used=llm_used,
+        fallback_used=fallback_used,
     )
 
 
-def classify_answer_type(
+def _classify_answer_type_with_rules(
     *,
     question: str,
     chat_context: dict[str, Any] | None,
@@ -469,10 +520,114 @@ def classify_answer_type(
     )
 
 
+def _normalize_provider_name(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"fallback_rule", "fallback"}:
+        return "fallback"
+    return normalized
+
+
+def _decision_from_llm_result(
+    *,
+    result: AnswerTypeClassificationResult,
+    question: str,
+    chat_context: dict[str, Any] | None,
+    retrieval: RetrievalResult,
+    provider: str,
+    llm_model: str,
+    fallback_used: bool,
+) -> AnswerTypeDecision:
+    chat_context = chat_context or {}
+    matched_terms = _semantic_terms(retrieval)[:8]
+    template_keys = _template_keys(retrieval)[:4]
+    preferred_metric_key = _hint_metric(retrieval)
+    preferred_dimension_keys = _hint_dimensions(retrieval)
+    preferred_time_dimension = _hint_time_dimension(retrieval)
+    inherited_from_chat = str(chat_context.get("anchor_answer_type") or "").strip()
+    answer_type = KEY_TO_ANSWER_TYPE.get(str(result.answer_type_key), AnswerTypeCode.SINGLE_VALUE)
+    matched_keywords = _matched_keywords(question, ANSWER_TYPE_KEYWORDS.get(answer_type, ()))
+    normalized_provider = _normalize_provider_name(provider)
+    llm_used = normalized_provider not in {"", "fallback"}
+    confidence_score = max(0, min(int(round(float(result.confidence or 0.0) * 100)), 100))
+    return _build_decision(
+        answer_type,
+        reason=str(result.reasoning or LLM_DEFAULT_REASONS[answer_type]),
+        explanation=LLM_DEFAULT_EXPLANATIONS[answer_type],
+        confidence_score=confidence_score,
+        matched_keywords=matched_keywords,
+        matched_semantic_terms=matched_terms,
+        retrieval_template_keys=template_keys,
+        inherited_from_chat=inherited_from_chat,
+        preferred_metric_key=preferred_metric_key,
+        preferred_dimension_keys=preferred_dimension_keys,
+        preferred_time_dimension=preferred_time_dimension,
+        classifier_source="llm" if llm_used else "rules",
+        provider=normalized_provider or "fallback",
+        llm_model=llm_model,
+        llm_used=llm_used,
+        fallback_used=fallback_used or not llm_used,
+    )
+
+
+def classify_answer_type(
+    *,
+    question: str,
+    chat_context: dict[str, Any] | None,
+    retrieval: RetrievalResult,
+) -> AnswerTypeDecision:
+    return _classify_answer_type_with_rules(question=question, chat_context=chat_context, retrieval=retrieval)
+
+
+async def resolve_answer_type_decision(
+    *,
+    question: str,
+    chat_context: dict[str, Any] | None,
+    retrieval: RetrievalResult,
+) -> AnswerTypeDecision:
+    try:
+        stage = await classify_answer_type_with_ai(question, chat_context, retrieval)
+    except LLMProviderError as exc:
+        if not settings.llm_fallback_allowed:
+            logger.error("answer_classifier source=llm error=%s", exc)
+            raise
+        decision = _classify_answer_type_with_rules(
+            question=question,
+            chat_context=chat_context,
+            retrieval=retrieval,
+        )
+        logger.warning(
+            "answer_classifier source=rules confidence=%.2f answer_type=%s reason=%s",
+            decision.confidence_score / 100.0,
+            decision.answer_type_key,
+            exc,
+        )
+        return decision
+
+    decision = _decision_from_llm_result(
+        result=stage.structured,
+        question=question,
+        chat_context=chat_context,
+        retrieval=retrieval,
+        provider=stage.response.provider,
+        llm_model=stage.response.model,
+        fallback_used=stage.response.telemetry.fallback_used,
+    )
+    logger.info(
+        "answer_classifier source=%s confidence=%.2f answer_type=%s provider=%s model=%s",
+        decision.classifier_source,
+        decision.confidence_score / 100.0,
+        decision.answer_type_key,
+        decision.provider,
+        decision.llm_model or "n/a",
+    )
+    return decision
+
+
 __all__ = [
     "ANSWER_TYPE_KEYS",
     "ANSWER_TYPE_LABELS",
     "PRIMARY_VIEW_BY_TYPE",
     "AnswerTypeDecision",
     "classify_answer_type",
+    "resolve_answer_type_decision",
 ]

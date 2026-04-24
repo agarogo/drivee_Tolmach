@@ -18,9 +18,11 @@ export type User = {
 };
 
 export type AuthResponse = {
-  access_token: string;
-  token_type: string;
   user: User;
+};
+
+export type LogoutResponse = {
+  ok: boolean;
 };
 
 export type RegisterPayload = {
@@ -369,6 +371,12 @@ export type QueryResult = {
   ambiguity_flags: string[];
   rows_returned: number;
   execution_ms: number;
+  provider: string;
+  llm_provider: string;
+  llm_model: string;
+  llm_used: boolean;
+  fallback_used: boolean;
+  retrieval_used: boolean;
   answer_type_code: number;
   answer_type_key: AnswerEnvelope["answer_type_key"];
   primary_view_mode: ViewMode;

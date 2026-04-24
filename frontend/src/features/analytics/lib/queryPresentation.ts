@@ -269,6 +269,10 @@ export function getUnderstandingEntries(query: QueryResult): Array<{ label: stri
     { label: "Period", value: period },
     { label: "Filters", value: Object.keys(filters).length ? JSON.stringify(filters) : "No explicit filters" },
     { label: "Intent source", value: explainability?.source || String(interpretation.source || "unknown") },
+    { label: "LLM provider", value: query.llm_provider || query.provider || "not used" },
+    { label: "LLM used", value: query.llm_used ? "Yes" : "No" },
+    { label: "Fallback used", value: query.fallback_used ? "Yes" : "No" },
+    { label: "Retrieval used", value: query.retrieval_used ? "Yes" : "No" },
   ];
 }
 

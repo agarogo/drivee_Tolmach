@@ -10,12 +10,13 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.answer import (
+    AnswerContractError,
     build_answer_envelope,
     explain_interpretation,
     legacy_chart_spec_from_answer,
     render_answer_text,
 )
-from app.ai.answer_classifier import AnswerTypeDecision, classify_answer_type
+from app.ai.answer_classifier import AnswerTypeDecision, resolve_answer_type_decision
 from app.ai.answer_strategy import build_answer_plan, compile_answer_query, execute_answer_plan
 from app.ai.confidence import score_confidence
 from app.ai.gateway.service import (
@@ -254,7 +255,7 @@ async def run_query_workflow(
         }
 
     async with trace_step(db, query, "Answer type classification") as event:
-        decision = classify_answer_type(
+        decision = await resolve_answer_type_decision(
             question=question,
             chat_context=chat_context.context_json,
             retrieval=retrieval,
@@ -757,23 +758,63 @@ async def run_query_workflow(
 
     async with trace_step(db, query, "Answer contract selection") as event:
         combined_sql = _combined_sql_text(executed_plan)
-        envelope = build_answer_envelope(
-            question=question,
-            decision=decision,
-            interpretation=interpretation,
-            confidence=confidence,
-            executed_plan=executed_plan,
-            status="success",
-            query_id=query.id,
-            chat_id=query.chat_id,
-            created_at=query.created_at,
-            updated_at=query.updated_at,
-            execution_ms=query.execution_ms,
-            sql_text=combined_sql,
-            sql_explain_cost=float(query.sql_explain_cost or 0.0),
-            semantic_terms=retrieval.semantic_terms,
-            notes=answer_plan.notes,
-        )
+        try:
+            envelope = build_answer_envelope(
+                question=question,
+                decision=decision,
+                interpretation=interpretation,
+                confidence=confidence,
+                executed_plan=executed_plan,
+                status="success",
+                query_id=query.id,
+                chat_id=query.chat_id,
+                created_at=query.created_at,
+                updated_at=query.updated_at,
+                execution_ms=query.execution_ms,
+                sql_text=combined_sql,
+                sql_explain_cost=float(query.sql_explain_cost or 0.0),
+                semantic_terms=retrieval.semantic_terms,
+                notes=answer_plan.notes,
+            )
+        except AnswerContractError as exc:
+            query.status = "blocked"
+            query.block_reason = str(exc)
+            query.error_message = str(exc)
+            query.sql_plan_json = {
+                **(query.sql_plan_json or {}),
+                "answer_contract_error": str(exc),
+            }
+            event.status = "blocked"
+            event.payload_json = {
+                "answer_contract_error": str(exc),
+            }
+            envelope = build_answer_envelope(
+                question=question,
+                decision=decision,
+                interpretation=interpretation,
+                confidence=confidence,
+                executed_plan=executed_plan,
+                status="blocked",
+                query_id=query.id,
+                chat_id=query.chat_id,
+                created_at=query.created_at,
+                updated_at=query.updated_at,
+                execution_ms=query.execution_ms,
+                sql_text=combined_sql,
+                sql_explain_cost=float(query.sql_explain_cost or 0.0),
+                semantic_terms=retrieval.semantic_terms,
+                notes=answer_plan.notes + [str(exc)],
+            )
+            _apply_answer_contract(query, envelope)
+            query.ai_answer = "Answer contract could not be materialized from the executed result."
+            query.interpretation_json = {
+                **(query.interpretation_json or {}),
+                "explain": explain_interpretation(decision=decision, interpretation=interpretation, envelope=envelope),
+            }
+            await db.commit()
+            await db.refresh(query)
+            return query
+
         _apply_answer_contract(query, envelope)
         event.payload_json = {
             "answer_type_code": query.answer_type_code,

@@ -65,6 +65,7 @@ class PromptRegistry:
 
     def configured_version(self, prompt_key: str) -> str:
         mapping = {
+            "answer_type_classifier": settings.llm_prompt_classifier_version,
             "intent_extraction": settings.llm_prompt_intent_version,
             "clarification_need": settings.llm_prompt_clarification_version,
             "sql_plan_draft": settings.llm_prompt_plan_version,

@@ -11,6 +11,7 @@ from app.ai.gateway.providers import (
 )
 from app.ai.gateway.prompts import PromptDefinition, PromptRegistry, get_prompt_registry
 from app.ai.gateway.schemas import (
+    AnswerTypeClassificationResult,
     AnswerSummaryDraft,
     ClarificationNeedResult,
     ClarificationOption,
@@ -24,7 +25,9 @@ from app.ai.gateway.service import (
     GatewayStageResult,
     build_answer_summary_with_ai,
     build_clarification_with_ai,
+    classify_answer_type_with_ai,
     create_ai_gateway,
+    create_classifier_gateway,
     draft_sql_plan_with_ai,
     extract_intent_with_ai,
     render_answer_summary,
@@ -33,6 +36,7 @@ from app.ai.gateway.service import (
 
 __all__ = [
     "AIGateway",
+    "AnswerTypeClassificationResult",
     "AnswerSummaryDraft",
     "ClarificationNeedResult",
     "ClarificationOption",
@@ -54,7 +58,9 @@ __all__ = [
     "SQLPlanDraft",
     "build_answer_summary_with_ai",
     "build_clarification_with_ai",
+    "classify_answer_type_with_ai",
     "create_ai_gateway",
+    "create_classifier_gateway",
     "draft_sql_plan_with_ai",
     "extract_intent_with_ai",
     "get_prompt_registry",

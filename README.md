@@ -1,171 +1,203 @@
-# Толмач by Drivee
+# Tolmach by Drivee
 
-Production-like MVP self-service аналитики: пользователь задаёт вопрос на русском языке, система интерпретирует запрос, ищет бизнес-термины в semantic layer, считает confidence, генерирует безопасный read-only SQL, выполняет его в PostgreSQL, показывает explainability, таблицу, график, AI summary, отчёты и расписание.
+Production-ready MVP for governed self-service analytics with FastAPI, React, PostgreSQL, scheduler workers, and live LLM orchestration.
 
-## Стек
+## Architecture
 
-- Backend: FastAPI, SQLAlchemy 2.0 async, asyncpg, Alembic, PostgreSQL.
-- Frontend: React/Vite, TypeScript, TanStack Query, Recharts.
-- AI workflow: interpreter, semantic retrieval, confidence scoring, SQL planner/generator, guardrails, safe executor, auto-fix, answer composer.
-- Observability: persisted `query_events` and `sql_guardrail_logs`, Phoenix/OpenTelemetry container in Docker Compose.
+```text
+frontend (React + Vite)
+  -> backend API (FastAPI)
+    -> platform DB (app schema: users, chats, sessions, semantic layer, reports)
+    -> analytics DB (fact/dim/mart tables, read-only SQL execution)
+    -> scheduler worker (scheduled reports, deliveries, artifacts)
+    -> Ollama or production LLM gateway
+    -> Phoenix / OpenTelemetry
+```
 
-## Быстрый запуск
+### Runtime components
+
+- `frontend`: React + TypeScript UI with cookie-based auth and CSRF headers.
+- `backend`: FastAPI API, session auth, semantic retrieval, LLM orchestration, SQL guardrails, report APIs.
+- `db`: PostgreSQL for local end-to-end startup.
+- `scheduler`: background worker that executes schedules and deliveries.
+- `ollama`: local LLM runtime used by default in Docker Compose.
+- `phoenix`: trace and prompt observability endpoint.
+
+### Database split
+
+- `PLATFORM_DATABASE_URL`: application metadata, sessions, chats, semantic catalog, reports, audit tables.
+- `ANALYTICS_DATABASE_URL`: read-only execution target for governed SQL.
+- Local `docker-compose` points both URLs to the same PostgreSQL instance so the stack is runnable out of the box.
+- In production you can split them, but the analytics database must already contain the governed `fact.*`, `dim.*`, and `mart.*` tables used by the executor.
+
+## Quick Start
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-Открыть:
+Open:
 
 - Frontend: `http://localhost:5173`
 - Backend docs: `http://localhost:8000/docs`
-- Phoenix traces: `http://localhost:6006`
+- Phoenix: `http://localhost:6006`
 
-При старте backend выполняет только `alembic upgrade head`.
-Demo data больше не seed-ится автоматически и запускается только явно через `python -m app.bootstrap_cli`.
+First startup may take several minutes because `ollama-init` pulls `${LLM_MODEL}` before the backend becomes healthy.
 
-### Подключение к PostgreSQL
+### Demo accounts
 
-Backend всегда использует `DATABASE_URL` из `.env`, если переменная задана. Это нужно для production/external PostgreSQL: миграции Alembic выполняются именно в этой БД.
-Demo bootstrap по умолчанию блокируется для non-local DSN.
+- `user@tolmach.local` / `user123`
+- `admin@tolmach.local` / `admin123`
 
-Для локального compose можно оставить значение из `.env.example`:
+## Security Model
 
-```bash
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/tolmach
+- CORS is restricted to `FRONTEND_ORIGINS`; wildcard origins are rejected.
+- Auth is cookie-only. No bearer tokens and no auth data in `localStorage`.
+- Session cookie is `HttpOnly`.
+- CSRF protection requires cookie + header match on every non-safe request.
+- SQL execution is read-only and passes semantic compilation plus guardrails before reaching PostgreSQL.
+
+## AI Pipeline
+
+1. Frontend sends the question with browser cookies and the CSRF header.
+2. Backend restores chat context and semantic retrieval candidates.
+3. LLM classifies `answer_type_key` (`chat_help`, `single_value`, `comparison_top`, `trend`, `distribution`, `table`, `full_report`).
+4. LLM extracts structured intent.
+5. If ambiguity remains, LLM produces clarification options.
+6. LLM drafts an intermediate SQL plan.
+7. Semantic compiler turns the draft into governed SQL only from approved metrics, dimensions, and filters.
+8. Guardrails validate read-only SQL, inject limits, run `EXPLAIN`, and reject unsafe queries.
+9. Executor runs the validated SQL against `ANALYTICS_DATABASE_URL`.
+10. LLM optionally writes the factual answer summary from returned rows.
+11. API returns the answer envelope plus telemetry:
+
+```json
+{
+  "provider": "ollama",
+  "llm_provider": "ollama",
+  "llm_model": "qwen3:4b",
+  "llm_used": true,
+  "fallback_used": false,
+  "retrieval_used": true
+}
 ```
 
-Для внешней БД укажите DSN провайдера:
+## Models and Providers
+
+- Default local provider: `LLM_PROVIDER=ollama`
+- Default local model: `LLM_MODEL=qwen3:4b`
+- Production provider: `LLM_PROVIDER=production` with an OpenAI-compatible `/chat/completions` endpoint
+- Rule fallback is allowed only outside `APP_ENV=demo|production` and only when `LLM_STRICT_MODE=false` and `LLM_RULE_FALLBACK_ENABLED=true`
+
+### Fail-fast behavior
+
+- If strict mode is enabled and the LLM is unavailable, the request returns `503` instead of silently switching to fake AI.
+- If fallback is used outside strict mode, the backend logs a warning and the API response exposes `fallback_used=true`.
+
+## How To Verify The LLM Is Real
+
+1. Start the stack with `docker compose up --build`.
+2. Confirm model pull and API startup:
 
 ```bash
-DATABASE_URL=postgresql://user:password@host:5432/database
+docker compose logs -f ollama ollama-init backend
 ```
 
-Система нормализует `postgresql://` в async SQLAlchemy URL автоматически.
-
-### Если backend падает на миграции
-
-Если в логах есть `relation "cities" already exists`, значит Docker использует старый PostgreSQL volume с прежней demo-схемой. В `docker-compose.yml` задан отдельный named volume `drivee-tolmach-postgres-data`, чтобы новый MVP стартовал на чистой локальной БД без удаления старых данных.
-
-Если нужен полный сброс локальной БД с потерей данных, остановите compose и удалите volume:
+Manual model check:
 
 ```bash
-docker compose down -v
-docker compose up --build
+docker exec <ollama_container> ollama list
 ```
 
-## Демо-аккаунты
+The list must contain `qwen3:4b` (or your configured `LLM_MODEL`). If the model is missing, `ollama-init` now exits with an error and the backend will not start.
 
-- User: `user@tolmach.local` / `user123`
-- Admin: `admin@tolmach.local` / `admin123`
+3. Sign in through the UI.
+4. Run a question such as `show revenue by top 10 cities for the last 30 days`.
+5. Check the response in browser devtools or `GET /queries/history` and confirm:
 
-## Структура
+- `llm_used` is `true`
+- `fallback_used` is `false`
+- `llm_provider` is `ollama` or `production`
+- `llm_model` is populated
+
+If you see `provider=fallback` or `llm_used=false`, the request was degraded and the logs should show why.
+
+## Example: Request -> SQL -> Answer
+
+Request:
 
 ```text
-backend/
-  alembic/
-  app/
-    ai/                  # interpreter, retrieval, confidence, planner, generator, orchestrator
-    services/            # guardrails, safe executor, bootstrap
-    api.py
-    auth.py
-    config.py
-    db.py
-    models.py
-    schemas.py
-  tests/
-frontend/
-  src/
-    api.ts
-    types.ts
-    components.tsx
-    App.tsx
-docs/
-  architecture.md
-  demo_script.md
+show revenue by top 10 cities for the last 30 days
 ```
 
-## База данных
+Representative SQL shape:
 
-- Public schema: Drivee dataset `orders`, `cities`, `drivers`, `clients`.
-- Если в production БД есть raw-таблица `train`, миграция `20260423_0002` использует её как источник фактов для `mart_orders` и `mart_tenders`; `orders` остаётся совместимой demo-таблицей.
-- Public read-only marts: `mart_orders`, `mart_tenders`, `mart_city_daily`, `mart_driver_daily`, `mart_client_daily`.
-- `tolmach` schema: `users`, `invites`, `refresh_tokens`, `queries`, `query_clarifications`, `query_events`, `sql_guardrail_logs`, `reports`, `report_versions`, `schedules`, `schedule_runs`, `report_recipients`, `templates`, `semantic_layer`, `semantic_examples`, `access_policies`, `chart_preferences`.
+```sql
+SELECT
+  dim_city.city_name AS city,
+  SUM(fo.price_order_local) FILTER (WHERE fo.status_order = 'done') AS revenue
+FROM fact.orders AS fo
+JOIN dim.cities AS dim_city ON dim_city.city_id = fo.city_id
+WHERE fo.order_day >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY dim_city.city_name
+ORDER BY revenue DESC
+LIMIT 10;
+```
 
-Важно: одна строка dataset соответствует комбинации `order_id + tender_id`. Метрики уровня заказа считаются через `mart_orders` и `COUNT(DISTINCT order_id)`.
+Representative answer:
 
-## API
+```text
+Revenue: Tokyo leads with 1,240,000. Osaka and Almaty follow.
+```
 
-- `POST /auth/login`
-- `GET /auth/me`
-- `POST /queries/run`
-- `POST /queries/{id}/clarify`
-- `GET /queries/history`
-- `GET /queries/{id}`
-- `POST /reports`
-- `GET /reports`
-- `GET /reports/{id}`
-- `PATCH /reports/{id}`
-- `POST /reports/{id}/run`
-- `POST /reports/{id}/share`
-- `GET /templates`
-- `POST /templates`
-- `GET /schedules`
-- `POST /schedules`
-- `PATCH /schedules/{id}`
-- `POST /schedules/{id}/toggle`
-- `GET /semantic-layer`
-- `POST /semantic-layer`
-- `GET /health`
-- `GET /metrics`
-- `GET /traces-link`
+The exact SQL can differ by semantic compilation strategy, but it must stay inside approved tables, columns, filters, and read-only guardrails.
 
-Compatibility routes `/api/chats`, `/api/reports`, `/api/templates` оставлены для прежнего shell.
+## Docker Compose Services
 
-## Guardrails
+- `db`: local PostgreSQL with healthcheck.
+- `ollama`: local LLM runtime.
+- `ollama-init`: one-shot model pull so `/queries/run` is usable after startup.
+- `backend`: runs migrations, seeds demo data, then starts FastAPI.
+- `scheduler`: background report worker with heartbeat healthcheck.
+- `frontend`: Vite dev server.
+- `phoenix`: prompt/tracing observability.
 
-Перед выполнением SQL система проверяет:
-
-- только `SELECT` / `WITH`;
-- denylist write/DDL keywords;
-- single statement;
-- parse tree через `sqlglot`;
-- table whitelist;
-- role-based `access_policies`;
-- forbidden columns;
-- запрет `SELECT *`;
-- limit injection/cap;
-- cost heuristics;
-- timeout через `statement_timeout`.
-
-Safe executor принимает только объект `ValidatedSQL`, который возвращает validator.
-
-## Confidence
-
-- High `>= 85`: SQL выполняется сразу.
-- Medium `55-84`: выполнение останавливается, UI показывает уточняющий вопрос.
-- Low/dangerous: clarify или blocked в зависимости от причины.
-
-## Проверки
+## Developer Verification
 
 ```bash
 python -m compileall backend/app backend/alembic
-$env:PYTHONPATH="backend"; python -m unittest discover backend/tests
-cd frontend
+python -m pip install -r backend/requirements.txt
+python -m unittest discover backend/tests
+./scripts/test_backend.ps1
+cd backend
+python -m unittest discover tests
+cd ../frontend
+npm install
 npm run build
+cd ..
+docker compose config
 ```
 
-## Документация
+## Key API Paths
 
-- Архитектура и Mermaid diagrams: `docs/architecture.md`
-- Демо-сценарий: `docs/demo_script.md`
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/logout`
+- `GET /auth/me`
+- `POST /queries/run`
+- `POST /queries/{query_id}/clarify`
+- `GET /queries/history`
+- `GET /queries/{query_id}`
+- `POST /reports`
+- `GET /reports`
+- `GET /schedules`
+- `GET /health`
 
-## Дальнейшие улучшения
+## Notes
 
-- Подключить реальный LLM provider к planner/generator как controlled node.
-- Добавить embeddings для semantic retrieval вместо MVP lexical scoring.
-- Подключить APScheduler/Celery для реального фонового запуска schedules.
-- Подключить Phoenix/OpenTelemetry exporter для внешних distributed traces.
-- Добавить RBAC UI для `access_policies` и semantic layer governance.
-- Добавить реальные CSV/PNG export jobs и email delivery.
+- `docker-compose` seeds demo data automatically on backend startup.
+- The frontend uses cookies only; opening old tabs from a bearer-token build is not supported.
+- The scheduler is part of the default stack and is expected to stay healthy in `docker compose ps`.
+- Host-side unittest discovery from the repo root is supported via `sitecustomize.py`, which adds `backend/` to `PYTHONPATH` automatically.
+- `scripts/test_backend.ps1` runs the host suite when local Python deps are installed and falls back to the Dockerized backend suite when they are not.

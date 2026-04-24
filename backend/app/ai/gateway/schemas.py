@@ -24,6 +24,17 @@ class FilterSelection(StrictSchema):
     values: list[str] = Field(default_factory=list)
 
 
+AnswerTypeKeyLiteral = Literal[
+    "chat_help",
+    "single_value",
+    "comparison_top",
+    "trend",
+    "distribution",
+    "table",
+    "full_report",
+]
+
+
 class ClarificationOption(StrictSchema):
     label: str = Field(min_length=1)
     value: str = Field(min_length=1)
@@ -38,6 +49,12 @@ class IntentExtractionResult(StrictSchema):
     limit: int | None = None
     sort_direction: Literal["asc", "desc"] = "desc"
     ambiguities: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    reasoning: str = ""
+
+
+class AnswerTypeClassificationResult(StrictSchema):
+    answer_type_key: AnswerTypeKeyLiteral = "single_value"
     confidence: float = 0.0
     reasoning: str = ""
 
