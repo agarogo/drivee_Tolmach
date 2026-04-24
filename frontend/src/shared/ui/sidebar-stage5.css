@@ -1,0 +1,95 @@
+.sidebar-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.sidebar-section-head small,
+.sidebar-chat-meta small {
+  color: var(--secondary);
+}
+
+.sidebar-state,
+.sidebar-empty {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--secondary);
+}
+
+.sidebar-state--error {
+  border-color: rgba(255, 77, 77, 0.24);
+}
+
+.sidebar-state p,
+.sidebar-empty span {
+  margin: 0;
+}
+
+.sidebar-chat-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sb-chat-item {
+  align-items: flex-start;
+}
+
+.sb-chat-item em {
+  color: var(--accent);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.icon-btn {
+  min-width: 76px;
+}
+
+.sidebar-delete-confirm {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 77, 77, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 77, 77, 0.08);
+}
+
+.sidebar-delete-confirm p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sidebar-delete-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.run-btn.small.danger {
+  background: linear-gradient(180deg, #ff6f5f, #e44332);
+}
+
+@media (max-width: 680px) {
+  .sidebar-delete-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-chat-meta {
+    display: grid;
+    gap: 4px;
+  }
+
+  .icon-btn {
+    min-width: 0;
+  }
+}

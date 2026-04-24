@@ -1,0 +1,21 @@
+.chat-state-card,
+.chat-empty-thread {
+  display: grid;
+  gap: 16px;
+}
+
+.chat-state-card .analytics-lead,
+.chat-empty-thread .analytics-lead {
+  margin: 0;
+}
+
+.chat-empty-thread .examples-grid {
+  margin-top: 4px;
+}
+
+@media (max-width: 680px) {
+  .chat-state-card,
+  .chat-empty-thread {
+    padding: 16px;
+  }
+}
