@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Tolmach"
     app_env: str = "development"
+    json_logs: bool = False
 
     platform_database_url: str = ""
     analytics_database_url: str = ""

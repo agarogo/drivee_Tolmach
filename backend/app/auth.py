@@ -263,3 +263,50 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
             detail="Admin access is required.",
         )
     return user
+
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    "admin": {"*"},
+    "analyst": {
+        "queries.run",
+        "queries.read",
+        "reports.create",
+        "reports.read",
+        "reports.run",
+        "templates.read",
+        "semantic.read",
+    },
+    "manager": {
+        "queries.run",
+        "queries.read",
+        "reports.create",
+        "reports.read",
+        "reports.run",
+        "templates.read",
+    },
+    "viewer": {"queries.read", "reports.read", "templates.read"},
+    "user": {
+        "queries.run",
+        "queries.read",
+        "reports.create",
+        "reports.read",
+        "reports.run",
+        "templates.read",
+    },
+}
+
+
+def has_permission(user: User, permission: str) -> bool:
+    permissions = ROLE_PERMISSIONS.get(user.role or "user", set())
+    return "*" in permissions or permission in permissions
+
+
+def require_permission(permission: str):
+    async def _dependency(user: User = Depends(get_current_user)) -> User:
+        if not has_permission(user, permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permission required: {permission}",
+            )
+        return user
+
+    return _dependency

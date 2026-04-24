@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import logging
 from typing import Iterator
 
 _tracer = None
@@ -32,3 +33,32 @@ def trace_span(name: str, attributes: dict | None = None) -> Iterator[None]:
         for key, value in (attributes or {}).items():
             span.set_attribute(key, str(value))
         yield
+
+
+class JsonLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+
+        payload = {
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "time": self.formatTime(record, self.datefmt),
+        }
+        request_id = getattr(record, "request_id", None)
+        if request_id:
+            payload["request_id"] = request_id
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def setup_logging(json_logs: bool = False) -> None:
+    import logging
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonLogFormatter() if json_logs else logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)

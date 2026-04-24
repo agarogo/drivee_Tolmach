@@ -1,11 +1,16 @@
-from app.api.common import *
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from app.config import get_settings
+
+settings = get_settings()
 
 
 router = APIRouter(tags=["System"])
 
 
 @router.get("/health")
-@router.get("/api/health")
 async def health() -> dict:
     return {
         "status": "ok",

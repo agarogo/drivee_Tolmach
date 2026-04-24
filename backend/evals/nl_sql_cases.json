@@ -1,0 +1,23 @@
+[
+  {
+    "id": "orders_by_city_yesterday",
+    "question": "Покажи поездки и отмены по городам за вчера",
+    "expected_metric_keys": ["orders_count", "cancelled_orders_count"],
+    "expected_dimensions": ["city"],
+    "expected_period": "yesterday"
+  },
+  {
+    "id": "conversion_by_channel_week_compare",
+    "question": "Сравни конверсию в заказах по каналам за текущую неделю и прошлую",
+    "expected_metric_keys": ["order_conversion"],
+    "expected_dimensions": ["channel"],
+    "expected_period": "current_week_vs_previous_week"
+  },
+  {
+    "id": "orders_last_month",
+    "question": "Сколько заказов было за прошлый месяц?",
+    "expected_metric_keys": ["orders_count"],
+    "expected_dimensions": [],
+    "expected_period": "previous_month"
+  }
+]

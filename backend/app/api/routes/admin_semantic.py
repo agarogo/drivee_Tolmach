@@ -1,10 +1,21 @@
-from app.api.common import *
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_db, require_admin
+from app.models import User
+from app.schemas import ApprovedTemplateCreate, ApprovedTemplateOut, ApprovedTemplatePatch, DimensionCatalogCreate, DimensionCatalogOut, DimensionCatalogPatch, MetricCatalogCreate, MetricCatalogOut, MetricCatalogPatch, SemanticExampleCreate, SemanticExampleOut, SemanticExamplePatch, SemanticTermCreate, SemanticTermOut, SemanticTermPatch, SemanticValidationReportOut
+from app.semantic import repository as semantic_repository
+from app.semantic.service import create_approved_template_entry, create_dimension_catalog_entry, create_metric_catalog_entry, create_semantic_example_entry, create_semantic_term_entry, delete_approved_template_entry, delete_dimension_catalog_entry, delete_metric_catalog_entry, delete_semantic_example_entry, delete_semantic_term_entry, update_approved_template_entry, update_dimension_catalog_entry, update_metric_catalog_entry, update_semantic_example_entry, update_semantic_term_entry, validate_semantic_layer
 
 
-router = APIRouter(tags=["Admin semantic"])
+router = APIRouter(prefix="/admin/semantic", tags=["Admin semantic"])
 
 
-@router.get("/admin/semantic/validate", response_model=SemanticValidationReportOut)
+@router.get("/validate", response_model=SemanticValidationReportOut)
 async def admin_validate_semantic_catalog(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -12,7 +23,7 @@ async def admin_validate_semantic_catalog(
     return SemanticValidationReportOut.model_validate((await validate_semantic_layer(db)).as_dict())
 
 
-@router.get("/admin/semantic/metrics", response_model=list[MetricCatalogOut])
+@router.get("/metrics", response_model=list[MetricCatalogOut])
 async def admin_list_metric_catalog(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -21,7 +32,7 @@ async def admin_list_metric_catalog(
     return [MetricCatalogOut.model_validate(row) for row in rows]
 
 
-@router.post("/admin/semantic/metrics", response_model=MetricCatalogOut)
+@router.post("/metrics", response_model=MetricCatalogOut)
 async def admin_create_metric_catalog(
     payload: MetricCatalogCreate,
     db: AsyncSession = Depends(get_db),
@@ -31,7 +42,7 @@ async def admin_create_metric_catalog(
     return MetricCatalogOut.model_validate(item)
 
 
-@router.patch("/admin/semantic/metrics/{metric_key}", response_model=MetricCatalogOut)
+@router.patch("/metrics/{metric_key}", response_model=MetricCatalogOut)
 async def admin_update_metric_catalog(
     metric_key: str,
     payload: MetricCatalogPatch,
@@ -47,7 +58,7 @@ async def admin_update_metric_catalog(
     return MetricCatalogOut.model_validate(item)
 
 
-@router.delete("/admin/semantic/metrics/{metric_key}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/metrics/{metric_key}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_metric_catalog(
     metric_key: str,
     db: AsyncSession = Depends(get_db),
@@ -56,7 +67,7 @@ async def admin_delete_metric_catalog(
     await delete_metric_catalog_entry(db, metric_key)
 
 
-@router.get("/admin/semantic/dimensions", response_model=list[DimensionCatalogOut])
+@router.get("/dimensions", response_model=list[DimensionCatalogOut])
 async def admin_list_dimension_catalog(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -65,7 +76,7 @@ async def admin_list_dimension_catalog(
     return [DimensionCatalogOut.model_validate(row) for row in rows]
 
 
-@router.post("/admin/semantic/dimensions", response_model=DimensionCatalogOut)
+@router.post("/dimensions", response_model=DimensionCatalogOut)
 async def admin_create_dimension_catalog(
     payload: DimensionCatalogCreate,
     db: AsyncSession = Depends(get_db),
@@ -75,7 +86,7 @@ async def admin_create_dimension_catalog(
     return DimensionCatalogOut.model_validate(item)
 
 
-@router.patch("/admin/semantic/dimensions/{dimension_key}", response_model=DimensionCatalogOut)
+@router.patch("/dimensions/{dimension_key}", response_model=DimensionCatalogOut)
 async def admin_update_dimension_catalog(
     dimension_key: str,
     payload: DimensionCatalogPatch,
@@ -91,7 +102,7 @@ async def admin_update_dimension_catalog(
     return DimensionCatalogOut.model_validate(item)
 
 
-@router.delete("/admin/semantic/dimensions/{dimension_key}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/dimensions/{dimension_key}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_dimension_catalog(
     dimension_key: str,
     db: AsyncSession = Depends(get_db),
@@ -100,7 +111,7 @@ async def admin_delete_dimension_catalog(
     await delete_dimension_catalog_entry(db, dimension_key)
 
 
-@router.get("/admin/semantic/terms", response_model=list[SemanticTermOut])
+@router.get("/terms", response_model=list[SemanticTermOut])
 async def admin_list_semantic_terms(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -109,7 +120,7 @@ async def admin_list_semantic_terms(
     return [SemanticTermOut.model_validate(row) for row in rows]
 
 
-@router.post("/admin/semantic/terms", response_model=SemanticTermOut)
+@router.post("/terms", response_model=SemanticTermOut)
 async def admin_create_semantic_term(
     payload: SemanticTermCreate,
     db: AsyncSession = Depends(get_db),
@@ -119,7 +130,7 @@ async def admin_create_semantic_term(
     return SemanticTermOut.model_validate(item)
 
 
-@router.patch("/admin/semantic/terms/{term}", response_model=SemanticTermOut)
+@router.patch("/terms/{term}", response_model=SemanticTermOut)
 async def admin_update_semantic_term(
     term: str,
     payload: SemanticTermPatch,
@@ -130,7 +141,7 @@ async def admin_update_semantic_term(
     return SemanticTermOut.model_validate(item)
 
 
-@router.delete("/admin/semantic/terms/{term}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/terms/{term}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_semantic_term(
     term: str,
     db: AsyncSession = Depends(get_db),
@@ -139,7 +150,7 @@ async def admin_delete_semantic_term(
     await delete_semantic_term_entry(db, term)
 
 
-@router.get("/admin/semantic/examples", response_model=list[SemanticExampleOut])
+@router.get("/examples", response_model=list[SemanticExampleOut])
 async def admin_list_semantic_examples(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -148,7 +159,7 @@ async def admin_list_semantic_examples(
     return [SemanticExampleOut.model_validate(row) for row in rows]
 
 
-@router.post("/admin/semantic/examples", response_model=SemanticExampleOut)
+@router.post("/examples", response_model=SemanticExampleOut)
 async def admin_create_semantic_example(
     payload: SemanticExampleCreate,
     db: AsyncSession = Depends(get_db),
@@ -158,7 +169,7 @@ async def admin_create_semantic_example(
     return SemanticExampleOut.model_validate(item)
 
 
-@router.patch("/admin/semantic/examples/{example_id}", response_model=SemanticExampleOut)
+@router.patch("/examples/{example_id}", response_model=SemanticExampleOut)
 async def admin_update_semantic_example(
     example_id: UUID,
     payload: SemanticExamplePatch,
@@ -174,7 +185,7 @@ async def admin_update_semantic_example(
     return SemanticExampleOut.model_validate(item)
 
 
-@router.delete("/admin/semantic/examples/{example_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/examples/{example_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_semantic_example(
     example_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -183,7 +194,7 @@ async def admin_delete_semantic_example(
     await delete_semantic_example_entry(db, example_id)
 
 
-@router.get("/admin/semantic/approved-templates", response_model=list[ApprovedTemplateOut])
+@router.get("/approved-templates", response_model=list[ApprovedTemplateOut])
 async def admin_list_approved_templates(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -192,7 +203,7 @@ async def admin_list_approved_templates(
     return [ApprovedTemplateOut.model_validate(row) for row in rows]
 
 
-@router.post("/admin/semantic/approved-templates", response_model=ApprovedTemplateOut)
+@router.post("/approved-templates", response_model=ApprovedTemplateOut)
 async def admin_create_approved_template(
     payload: ApprovedTemplateCreate,
     db: AsyncSession = Depends(get_db),
@@ -202,7 +213,7 @@ async def admin_create_approved_template(
     return ApprovedTemplateOut.model_validate(item)
 
 
-@router.patch("/admin/semantic/approved-templates/{template_key}", response_model=ApprovedTemplateOut)
+@router.patch("/approved-templates/{template_key}", response_model=ApprovedTemplateOut)
 async def admin_update_approved_template(
     template_key: str,
     payload: ApprovedTemplatePatch,
@@ -218,7 +229,7 @@ async def admin_update_approved_template(
     return ApprovedTemplateOut.model_validate(item)
 
 
-@router.delete("/admin/semantic/approved-templates/{template_key}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/approved-templates/{template_key}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_approved_template(
     template_key: str,
     db: AsyncSession = Depends(get_db),

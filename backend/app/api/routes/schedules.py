@@ -1,10 +1,24 @@
-from app.api.common import *
+from __future__ import annotations
+
+from datetime import time
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.api.utils import run_to_out, schedule_to_out
+from app.models import Report, Schedule, User
+from app.reports import append_report_recipients, create_run_record, execute_report_run, list_report_runs, next_run_at, replace_report_recipients
+from app.repositories.reports import require_owned_report, require_owned_schedule
+from app.schemas import ScheduleCreate, ScheduleOut, SchedulePatch, ScheduleRunOut
 
 
-router = APIRouter(tags=["Schedules"])
+router = APIRouter(prefix="/schedules", tags=["Schedules"])
 
 
-@router.get("/schedules", response_model=list[ScheduleOut])
+@router.get("", response_model=list[ScheduleOut])
 async def list_schedules(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[ScheduleOut]:
     rows = list(
         (
@@ -19,7 +33,7 @@ async def list_schedules(db: AsyncSession = Depends(get_db), user: User = Depend
     return [await schedule_to_out(db, row) for row in rows]
 
 
-@router.post("/schedules", response_model=ScheduleOut)
+@router.post("", response_model=ScheduleOut)
 async def create_schedule(
     payload: ScheduleCreate,
     db: AsyncSession = Depends(get_db),
@@ -49,7 +63,7 @@ async def create_schedule(
     return await schedule_to_out(db, item)
 
 
-@router.patch("/schedules/{schedule_id}", response_model=ScheduleOut)
+@router.patch("/{schedule_id}", response_model=ScheduleOut)
 async def patch_schedule(
     schedule_id: UUID,
     payload: SchedulePatch,
@@ -78,7 +92,7 @@ async def patch_schedule(
     return await schedule_to_out(db, item)
 
 
-@router.post("/schedules/{schedule_id}/toggle", response_model=ScheduleOut)
+@router.post("/{schedule_id}/toggle", response_model=ScheduleOut)
 async def toggle_schedule(schedule_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ScheduleOut:
     item = await require_owned_schedule(db, schedule_id, user)
     if not item:
@@ -91,7 +105,7 @@ async def toggle_schedule(schedule_id: UUID, db: AsyncSession = Depends(get_db),
     return await schedule_to_out(db, item)
 
 
-@router.post("/schedules/{schedule_id}/run-now", response_model=ScheduleRunOut)
+@router.post("/{schedule_id}/run-now", response_model=ScheduleRunOut)
 async def run_schedule_now(
     schedule_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -113,7 +127,7 @@ async def run_schedule_now(
     return await run_to_out(db, run)
 
 
-@router.get("/schedules/{schedule_id}/history", response_model=list[ScheduleRunOut])
+@router.get("/{schedule_id}/history", response_model=list[ScheduleRunOut])
 async def schedule_history(
     schedule_id: UUID,
     limit: int = ApiQuery(default=30, ge=1, le=200),

@@ -1,10 +1,25 @@
-from app.api.common import *
+from __future__ import annotations
+
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.api.utils import device_hint, to_user_out
+from app.auth import apply_session_cookies, clear_session_cookies, create_session_bundle, hash_password, needs_password_rehash, revoke_session, verify_password
+from app.config import get_settings
+from app.models import User
+from app.schemas import AuthResponse, LoginRequest, LogoutResponse, RegisterRequest, UserOut
+
+settings = get_settings()
 
 
-router = APIRouter(tags=["Auth"])
+router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
-@router.post("/auth/register", response_model=AuthResponse)
+@router.post("/register", response_model=AuthResponse)
 async def register(
     payload: RegisterRequest,
     request: Request,
@@ -25,14 +40,14 @@ async def register(
     )
     db.add(user)
     await db.flush()
-    bundle = await create_session_bundle(db, user=user, device_hint=_device_hint(request))
+    bundle = await create_session_bundle(db, user=user, device_hint=device_hint(request))
     apply_session_cookies(response, bundle)
     await db.commit()
     await db.refresh(user)
     return AuthResponse(user=to_user_out(user))
 
 
-@router.post("/auth/login", response_model=AuthResponse)
+@router.post("/login", response_model=AuthResponse)
 async def login(
     payload: LoginRequest,
     request: Request,
@@ -45,13 +60,13 @@ async def login(
     if needs_password_rehash(user.password_hash):
         user.password_hash = hash_password(payload.password)
     user.last_login_at = datetime.utcnow()
-    bundle = await create_session_bundle(db, user=user, device_hint=_device_hint(request))
+    bundle = await create_session_bundle(db, user=user, device_hint=device_hint(request))
     apply_session_cookies(response, bundle)
     await db.commit()
     return AuthResponse(user=to_user_out(user))
 
 
-@router.post("/auth/logout", response_model=LogoutResponse)
+@router.post("/logout", response_model=LogoutResponse)
 async def logout(
     request: Request,
     response: Response,
@@ -64,6 +79,6 @@ async def logout(
     return LogoutResponse(ok=True)
 
 
-@router.get("/auth/me", response_model=UserOut)
+@router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)) -> UserOut:
     return to_user_out(user)

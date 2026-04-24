@@ -1,11 +1,18 @@
-from app.api.common import *
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.models import Template, User
+from app.schemas import TemplateCreate, TemplateOut
 
 
-router = APIRouter(tags=["Templates"])
+router = APIRouter(prefix="/templates", tags=["Templates"])
 
 
-@router.get("/templates", response_model=list[TemplateOut])
-@router.get("/api/templates", response_model=list[TemplateOut])
+@router.get("", response_model=list[TemplateOut])
 async def list_templates(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[TemplateOut]:
     rows = list(
         (
@@ -19,8 +26,7 @@ async def list_templates(db: AsyncSession = Depends(get_db), user: User = Depend
     return [TemplateOut.model_validate(row) for row in rows]
 
 
-@router.post("/templates", response_model=TemplateOut)
-@router.post("/api/templates", response_model=TemplateOut)
+@router.post("", response_model=TemplateOut)
 async def create_template(
     payload: TemplateCreate,
     db: AsyncSession = Depends(get_db),

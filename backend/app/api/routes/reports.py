@@ -1,11 +1,30 @@
-from app.api.common import *
+from __future__ import annotations
+
+from datetime import datetime, time
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query as ApiQuery
+from fastapi.responses import Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.api.utils import report_to_out, run_to_out
+from app.config import get_settings
+from app.models import Report, Schedule, User
+from app.services.export import rows_to_csv
+from app.reports import append_report_recipients, build_semantic_snapshot_from_query, create_report_version, create_run_record, execute_report_run, list_report_runs, next_run_at, parse_run_time, replace_report_recipients
+from app.repositories.queries import require_owned_query
+from app.repositories.reports import require_owned_report
+from app.schemas import ReportCreate, ReportOut, ReportPatch, ScheduleRequest, ScheduleRunOut
+
+settings = get_settings()
 
 
-router = APIRouter(tags=["Reports"])
+router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
-@router.post("/reports", response_model=ReportOut)
-@router.post("/api/reports", response_model=ReportOut)
+@router.post("", response_model=ReportOut)
 async def create_report(
     payload: ReportCreate,
     db: AsyncSession = Depends(get_db),
@@ -59,8 +78,7 @@ async def create_report(
     return await report_to_out(db, item)
 
 
-@router.get("/reports", response_model=list[ReportOut])
-@router.get("/api/reports", response_model=list[ReportOut])
+@router.get("", response_model=list[ReportOut])
 async def list_reports(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[ReportOut]:
     rows = list(
         (
@@ -72,12 +90,12 @@ async def list_reports(db: AsyncSession = Depends(get_db), user: User = Depends(
     return [await report_to_out(db, row, include_detail=False) for row in rows]
 
 
-@router.get("/reports/{report_id}", response_model=ReportOut)
+@router.get("/{report_id}", response_model=ReportOut)
 async def get_report(report_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ReportOut:
     return await report_to_out(db, await require_owned_report(db, report_id, user))
 
 
-@router.patch("/reports/{report_id}", response_model=ReportOut)
+@router.patch("/{report_id}", response_model=ReportOut)
 async def patch_report(
     report_id: UUID,
     payload: ReportPatch,
@@ -102,7 +120,7 @@ async def patch_report(
     return await report_to_out(db, item)
 
 
-@router.post("/reports/{report_id}/run", response_model=ReportOut)
+@router.post("/{report_id}/run", response_model=ReportOut)
 async def run_report(report_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> ReportOut:
     item = await require_owned_report(db, report_id, user)
     run = await create_run_record(
@@ -120,7 +138,7 @@ async def run_report(report_id: UUID, db: AsyncSession = Depends(get_db), user: 
     return await report_to_out(db, item)
 
 
-@router.post("/reports/{report_id}/run-now", response_model=ScheduleRunOut)
+@router.post("/{report_id}/run-now", response_model=ScheduleRunOut)
 async def run_report_now(
     report_id: UUID,
     db: AsyncSession = Depends(get_db),
@@ -141,7 +159,7 @@ async def run_report_now(
     return await run_to_out(db, run)
 
 
-@router.get("/reports/{report_id}/history", response_model=list[ScheduleRunOut])
+@router.get("/{report_id}/history", response_model=list[ScheduleRunOut])
 async def report_history(
     report_id: UUID,
     limit: int = ApiQuery(default=30, ge=1, le=200),
@@ -153,7 +171,7 @@ async def report_history(
     return [await run_to_out(db, row) for row in rows]
 
 
-@router.post("/reports/{report_id}/share", response_model=ReportOut)
+@router.post("/{report_id}/share", response_model=ReportOut)
 async def share_report(
     report_id: UUID,
     recipients: list[str],
@@ -166,7 +184,7 @@ async def share_report(
     return await report_to_out(db, item)
 
 
-@router.post("/api/reports/{report_id}/schedule", response_model=ReportOut)
+@router.post("/{report_id}/schedule", response_model=ReportOut)
 async def schedule_report_legacy(
     report_id: UUID,
     payload: ScheduleRequest,
@@ -188,3 +206,18 @@ async def schedule_report_legacy(
     await append_report_recipients(db, report=item, recipients=[payload.email], delivery_targets=None)
     await db.commit()
     return await report_to_out(db, item)
+
+
+@router.get("/{report_id}/export.csv", response_class=Response)
+async def export_report_csv(
+    report_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    item = await require_owned_report(db, report_id, user)
+    csv_body = rows_to_csv(item.result_snapshot or [])
+    return Response(
+        content=csv_body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="report-{report_id}.csv"'},
+    )

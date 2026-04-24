@@ -1,10 +1,25 @@
-from app.api.common import *
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query as ApiQuery
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_db, require_admin
+from app.api.utils import run_to_out
+from app.models import Query, User
+from app.query_execution.benchmarks import BENCHMARK_PRESETS
+from app.query_execution.service import get_query_cache_stats, get_query_execution_summary, list_query_execution_audits
+from app.reports import get_scheduler_summary, list_report_runs
+from app.schemas import BenchmarkPresetOut, LogOut, QueryExecutionAuditOut, QueryExecutionCacheStatsOut, QueryExecutionSummaryOut, SchedulerSummaryOut, ScheduleRunOut
 
 
-router = APIRouter(tags=["Admin monitoring"])
+router = APIRouter(prefix="/admin", tags=["Admin monitoring"])
 
 
-@router.get("/admin/logs", response_model=list[LogOut])
+@router.get("/logs", response_model=list[LogOut])
 async def admin_logs(
     user_email: str | None = None,
     date_from: str | None = None,
@@ -37,7 +52,7 @@ async def admin_logs(
     ]
 
 
-@router.get("/admin/query-execution/cache", response_model=QueryExecutionCacheStatsOut)
+@router.get("/query-execution/cache", response_model=QueryExecutionCacheStatsOut)
 async def admin_query_execution_cache_stats(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -45,7 +60,7 @@ async def admin_query_execution_cache_stats(
     return QueryExecutionCacheStatsOut.model_validate(await get_query_cache_stats(db))
 
 
-@router.get("/admin/query-execution/summary", response_model=QueryExecutionSummaryOut)
+@router.get("/query-execution/summary", response_model=QueryExecutionSummaryOut)
 async def admin_query_execution_summary(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -53,7 +68,7 @@ async def admin_query_execution_summary(
     return QueryExecutionSummaryOut.model_validate(await get_query_execution_summary(db))
 
 
-@router.get("/admin/query-execution/audits", response_model=list[QueryExecutionAuditOut])
+@router.get("/query-execution/audits", response_model=list[QueryExecutionAuditOut])
 async def admin_query_execution_audits(
     limit: int = ApiQuery(default=50, ge=1, le=200),
     cache_hit: bool | None = None,
@@ -72,7 +87,7 @@ async def admin_query_execution_audits(
     return [QueryExecutionAuditOut.model_validate(row) for row in rows]
 
 
-@router.get("/admin/query-execution/benchmarks/presets", response_model=list[BenchmarkPresetOut])
+@router.get("/query-execution/benchmarks/presets", response_model=list[BenchmarkPresetOut])
 async def admin_query_execution_benchmark_presets(
     _: User = Depends(require_admin),
 ) -> list[BenchmarkPresetOut]:
@@ -82,7 +97,7 @@ async def admin_query_execution_benchmark_presets(
     ]
 
 
-@router.get("/admin/scheduler/summary", response_model=SchedulerSummaryOut)
+@router.get("/scheduler/summary", response_model=SchedulerSummaryOut)
 async def admin_scheduler_summary(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
@@ -90,7 +105,7 @@ async def admin_scheduler_summary(
     return SchedulerSummaryOut.model_validate(await get_scheduler_summary(db))
 
 
-@router.get("/admin/scheduler/runs", response_model=list[ScheduleRunOut])
+@router.get("/scheduler/runs", response_model=list[ScheduleRunOut])
 async def admin_scheduler_runs(
     limit: int = ApiQuery(default=50, ge=1, le=200),
     status_filter: str | None = None,
